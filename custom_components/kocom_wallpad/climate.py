@@ -8,6 +8,7 @@ from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
     ClimateEntityFeature,
     HVACMode,
+    HVACAction,
 )
 
 from homeassistant.const import Platform, UnitOfTemperature, ATTR_TEMPERATURE
@@ -80,6 +81,34 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
     @property
     def hvac_modes(self) -> List[HVACMode]:
         return self._device.attribute["hvac_modes"]
+    
+    # ----------------------------------------------------------------
+    # [추가됨] 난방 중/유휴 상태 표시를 위한 hvac_action 속성 추가
+    # ----------------------------------------------------------------
+    @property
+    def hvac_action(self) -> HVACAction | None:
+        """Return the current running hvac operation."""
+        # 1. 시스템이 꺼져 있으면 '꺼짐(Off)' 표시
+        if self.hvac_mode == HVACMode.OFF:
+            return HVACAction.OFF
+
+        # 2. 난방 모드일 때 동작 상태 판단
+        if self.hvac_mode == HVACMode.HEAT:
+            current = self.current_temperature
+            target = self.target_temperature
+            
+            # controller.py에서 값을 float로 넘겨주지만, 혹시 모를 None 체크
+            if current is not None and target is not None:
+                # 설정 온도가 현재 온도보다 높으면 '난방 중(Heating)'
+                if target > current:
+                    return HVACAction.HEATING
+                # 설정 온도가 낮거나 같으면 '대기(Idle)'
+                else:
+                    return HVACAction.IDLE
+        
+        # 그 외의 경우 대기 상태
+        return HVACAction.IDLE
+    # ----------------------------------------------------------------
     
     @property
     def fan_mode(self) -> str:
