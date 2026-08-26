@@ -220,14 +220,24 @@ class KocomController:
 
     def _handle_thermostat(self, frame: PacketFrame) -> List[DeviceState]:
         states: List[DeviceState] = []
-        # Only a thermostat-to-wallpad status report is physical evidence. An
-        # echoed wallpad command must not confirm a thermostat state.
-        if (
+        is_live_status = (
             frame.packet_type == 0x0B
             and frame.dest == b"\x01\x00"
             and frame.src[0] == 0x36
+            and 0x01 <= frame.src[1] <= 0xFE
             and frame.command == 0x00
-        ):
+        )
+        is_restore_mirror = (
+            bool(getattr(self.gateway, "_restore_mode", False))
+            and frame.packet_type == 0x0D
+            and frame.dest[0] == 0x36
+            and 0x01 <= frame.dest[1] <= 0xFE
+            and frame.src == b"\x01\x00"
+            and frame.command == 0x00
+        )
+        # A captured DC mirror may seed restored entity keys only while the
+        # gateway is restoring. It is never live physical confirmation.
+        if is_live_status or is_restore_mirror:
             key = DeviceKey(
                 device_type=frame.dev_type,
                 room_index=frame.dev_room,

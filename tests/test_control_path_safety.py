@@ -273,6 +273,11 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertFalse(controller._handle_thermostat(
             _thermostat_frame(21, 20, dest_room=0x01)
         ))
+        for room in (0x00, 0xFF):
+            with self.subTest(room=room):
+                self.assertFalse(controller._handle_thermostat(
+                    _thermostat_frame(21, 20, room=room)
+                ))
         states = controller._handle_thermostat(_thermostat_frame(21, 20))
         primary = next(state for state in states if state.key.sub_type == SubType.NONE)
         self.assertEqual(1, primary.key.room_index)
@@ -589,6 +594,56 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         self.assertIsNone(self.gateway._task_bootstrap_queries)
+
+    async def test_restore_mirror_seeds_query_but_only_bc_response_confirms(self):
+        room = 3
+        key = DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE)
+        restored_mirror = _thermostat_frame(
+            21,
+            20,
+            room=room,
+            packet_type=0x0D,
+            mirrored=True,
+        )
+
+        self.gateway._restore_mode = True
+        self.gateway.controller._dispatch_packet(restored_mirror.raw)
+        for invalid_room in (0x00, 0xFF):
+            self.gateway.controller._dispatch_packet(
+                _thermostat_frame(
+                    21,
+                    20,
+                    room=invalid_room,
+                    packet_type=0x0D,
+                    mirrored=True,
+                ).raw
+            )
+        self.gateway._restore_mode = False
+
+        self.assertIsNotNone(self.gateway.registry.get(key))
+        self.assertFalse(self.gateway.is_device_state_confirmed(key))
+        for invalid_room in (0x00, 0xFF):
+            invalid_key = DeviceKey(
+                DeviceType.THERMOSTAT,
+                invalid_room,
+                0,
+                SubType.NONE,
+            )
+            self.assertIsNone(self.gateway.registry.get(invalid_key))
+
+        self.gateway.controller._dispatch_packet(restored_mirror.raw)
+        self.assertFalse(self.gateway.is_device_state_confirmed(key))
+
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+        self.gateway._sync_connection_availability()
+        await self._wait_for_bootstrap()
+        self.assertEqual(1, len(self.gateway.conn.sent))
+        self.assertEqual(room, self.gateway.conn.sent[0][6])
+
+        self.gateway.controller._dispatch_packet(
+            _thermostat_frame(22, 20, room=room).raw
+        )
+        self.assertTrue(self.gateway.is_device_state_confirmed(key))
 
     async def test_valid_response_confirms_only_its_matching_thermostat_room(self):
         first = self._thermostat_state(1)
