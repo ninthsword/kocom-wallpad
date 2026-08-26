@@ -301,7 +301,7 @@ class KocomGateway:
                 key.device_type == DeviceType.THERMOSTAT
                 and key.device_index == 0
                 and key.sub_type == SubType.NONE
-                and 0x01 <= key.room_index <= 0xFE
+                and 0x00 <= key.room_index <= 0xFE
             ):
                 keys_by_identity[key.key] = key
         keys = [keys_by_identity[identity] for identity in sorted(keys_by_identity)]
@@ -421,7 +421,7 @@ class KocomGateway:
         ):
             return None
         room = int(room_text)
-        if not 0x01 <= room <= 0xFE or prefix != f"5-{room}_0-0":
+        if not 0x00 <= room <= 0xFE or prefix != f"5-{room}_0-0":
             return None
         return DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE)
 

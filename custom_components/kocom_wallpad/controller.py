@@ -224,14 +224,14 @@ class KocomController:
             frame.packet_type == 0x0B
             and frame.dest == b"\x01\x00"
             and frame.src[0] == 0x36
-            and 0x01 <= frame.src[1] <= 0xFE
+            and 0x00 <= frame.src[1] <= 0xFE
             and frame.command == 0x00
         )
         is_restore_mirror = (
             bool(getattr(self.gateway, "_restore_mode", False))
             and frame.packet_type == 0x0D
             and frame.dest[0] == 0x36
-            and 0x01 <= frame.dest[1] <= 0xFE
+            and 0x00 <= frame.dest[1] <= 0xFE
             and frame.src == b"\x01\x00"
             and frame.command == 0x00
         )
@@ -641,7 +641,7 @@ class KocomController:
         if action == "status_query":
             if device_type != DeviceType.THERMOSTAT:
                 raise ValueError("Status query is supported only for thermostats")
-            if not 0x01 <= room_index <= 0xFE:
+            if not 0x00 <= room_index <= 0xFE:
                 raise ValueError("Status query requires a physical thermostat room")
             command = bytes([0x3A])
         elif device_type in (DeviceType.LIGHT, DeviceType.OUTLET):

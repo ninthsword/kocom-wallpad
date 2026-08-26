@@ -234,14 +234,20 @@ class ControllerSafetyTests(unittest.TestCase):
     def test_status_query_has_exact_directed_frame_and_checksum(self):
         controller = KocomController(_ControllerGateway())
         key = DeviceKey(DeviceType.THERMOSTAT, 2, 0, SubType.NONE)
+        living_key = DeviceKey(DeviceType.THERMOSTAT, 0, 0, SubType.NONE)
 
         packet, _, _ = controller.generate_command(key, "status_query")
+        living_packet, _, _ = controller.generate_command(living_key, "status_query")
 
         self.assertEqual(
             bytes.fromhex("aa5530bc00360201003a00000000000000005f0d0d"), packet
         )
         self.assertEqual(21, len(packet))
         self.assertEqual(sum(packet[2:18]) % 256, packet[18])
+        self.assertEqual(
+            bytes.fromhex("aa5530bc00360001003a00000000000000005d0d0d"),
+            living_packet,
+        )
 
     def test_status_query_and_unknown_thermostat_actions_are_rejected(self):
         controller = KocomController(_ControllerGateway())
@@ -252,12 +258,11 @@ class ControllerSafetyTests(unittest.TestCase):
             controller.generate_command(light, "status_query")
         with self.assertRaises(ValueError):
             controller.generate_command(thermostat, "unsupported")
-        for room in (0x00, 0xFF):
-            with self.subTest(room=room), self.assertRaises(ValueError):
-                controller.generate_command(
-                    DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE),
-                    "status_query",
-                )
+        with self.assertRaises(ValueError):
+            controller.generate_command(
+                DeviceKey(DeviceType.THERMOSTAT, 0xFF, 0, SubType.NONE),
+                "status_query",
+            )
 
     def test_only_directed_thermostat_status_reports_are_parsed(self):
         controller = KocomController(_ControllerGateway())
@@ -274,11 +279,9 @@ class ControllerSafetyTests(unittest.TestCase):
         self.assertFalse(controller._handle_thermostat(
             _thermostat_frame(21, 20, dest_room=0x01)
         ))
-        for room in (0x00, 0xFF):
-            with self.subTest(room=room):
-                self.assertFalse(controller._handle_thermostat(
-                    _thermostat_frame(21, 20, room=room)
-                ))
+        self.assertFalse(controller._handle_thermostat(
+            _thermostat_frame(21, 20, room=0xFF)
+        ))
         states = controller._handle_thermostat(_thermostat_frame(21, 20))
         primary = next(state for state in states if state.key.sub_type == SubType.NONE)
         self.assertEqual(1, primary.key.room_index)
@@ -304,6 +307,17 @@ class ControllerSafetyTests(unittest.TestCase):
         states = controller._handle_thermostat(captured_status)
         self.assertTrue(states)
         self.assertFalse(controller._handle_thermostat(captured_mirror))
+
+        living_status = _thermostat_frame(21, 20, room=0)
+        self.assertEqual(
+            bytes.fromhex("aa5530bc00010036000010001500140000005c0d0d"),
+            living_status.raw,
+        )
+        living_states = controller._handle_thermostat(living_status)
+        living = next(
+            state for state in living_states if state.key.sub_type == SubType.NONE
+        )
+        self.assertEqual(0, living.key.room_index)
 
 
 class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
@@ -441,21 +455,22 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.gateway._sync_connection_availability()
         await self._wait_for_bootstrap()
         self.assertEqual(
-            [bytes.fromhex("aa5530bc00360101003a00000000000000005e0d0d"),
+            [bytes.fromhex("aa5530bc00360001003a00000000000000005d0d0d"),
+             bytes.fromhex("aa5530bc00360101003a00000000000000005e0d0d"),
              bytes.fromhex("aa5530bc00360201003a00000000000000005f0d0d")],
             self.gateway.conn.sent,
         )
 
         self.gateway._sync_connection_availability()
         await asyncio.sleep(0)
-        self.assertEqual(2, len(self.gateway.conn.sent))
+        self.assertEqual(3, len(self.gateway.conn.sent))
 
         self.gateway.conn.connected = False
         self.gateway._sync_connection_availability()
         self.gateway.conn.connected = True
         self.gateway._sync_connection_availability()
         await self._wait_for_bootstrap()
-        self.assertEqual(4, len(self.gateway.conn.sent))
+        self.assertEqual(6, len(self.gateway.conn.sent))
 
     async def test_registry_only_climates_seed_queries_without_placeholder_state(self):
         oversized_room = types.SimpleNamespace(
@@ -463,6 +478,10 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
             unique_id=f"5-{'9' * 5000}_0-0:test",
         )
         valid = [
+            types.SimpleNamespace(
+                entity_id="climate.living",
+                unique_id="5-0_0-0:test",
+            ),
             types.SimpleNamespace(
                 entity_id="climate.thermostat_1",
                 unique_id="5-1_0-0:test",
@@ -475,7 +494,6 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         invalid = [
             oversized_room,
             types.SimpleNamespace(entity_id="switch.other", unique_id="5-2_0-0:test"),
-            types.SimpleNamespace(entity_id="climate.zero", unique_id="5-0_0-0:test"),
             types.SimpleNamespace(entity_id="climate.broadcast", unique_id="5-255_0-0:test"),
             types.SimpleNamespace(entity_id="climate.leading_zero", unique_id="5-02_0-0:test"),
             types.SimpleNamespace(entity_id="climate.device", unique_id="4-2_0-0:test"),
@@ -501,25 +519,28 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], self.gateway.registry.all_by_platform(Platform.CLIMATE))
         self.assertEqual(
-            {1, 3},
+            {0, 1, 3},
             {key.room_index for key in self.gateway._bootstrap_registry_keys},
         )
-        for room in (1, 3):
+        for room in (0, 1, 3):
             key = DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE)
             self.assertFalse(self.gateway.is_device_state_confirmed(key))
 
         self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
         self.gateway._sync_connection_availability()
         await self._wait_for_bootstrap()
-        self.assertEqual([1, 3], [packet[6] for packet in self.gateway.conn.sent])
+        self.assertEqual([0, 1, 3], [packet[6] for packet in self.gateway.conn.sent])
 
+        living_key = DeviceKey(DeviceType.THERMOSTAT, 0, 0, SubType.NONE)
         first_key = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
         third_key = DeviceKey(DeviceType.THERMOSTAT, 3, 0, SubType.NONE)
         self.gateway.controller._dispatch_packet(
-            _thermostat_frame(22, 20, room=1).raw
+            _thermostat_frame(22, 20, room=0).raw
         )
-        self.assertIsNotNone(self.gateway.registry.get(first_key))
-        self.assertTrue(self.gateway.is_device_state_confirmed(first_key))
+        self.assertIsNotNone(self.gateway.registry.get(living_key))
+        self.assertTrue(self.gateway.is_device_state_confirmed(living_key))
+        self.assertIsNone(self.gateway.registry.get(first_key))
+        self.assertFalse(self.gateway.is_device_state_confirmed(first_key))
         self.assertIsNone(self.gateway.registry.get(third_key))
         self.assertFalse(self.gateway.is_device_state_confirmed(third_key))
 
@@ -712,7 +733,7 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.gateway._task_bootstrap_queries)
 
     async def test_restore_mirror_seeds_query_but_only_bc_response_confirms(self):
-        room = 3
+        room = 0
         key = DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE)
         restored_mirror = _thermostat_frame(
             21,
@@ -724,28 +745,21 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
 
         self.gateway._restore_mode = True
         self.gateway.controller._dispatch_packet(restored_mirror.raw)
-        for invalid_room in (0x00, 0xFF):
-            self.gateway.controller._dispatch_packet(
-                _thermostat_frame(
-                    21,
-                    20,
-                    room=invalid_room,
-                    packet_type=0x0D,
-                    mirrored=True,
-                ).raw
-            )
+        self.gateway.controller._dispatch_packet(
+            _thermostat_frame(
+                21,
+                20,
+                room=0xFF,
+                packet_type=0x0D,
+                mirrored=True,
+            ).raw
+        )
         self.gateway._restore_mode = False
 
         self.assertIsNotNone(self.gateway.registry.get(key))
         self.assertFalse(self.gateway.is_device_state_confirmed(key))
-        for invalid_room in (0x00, 0xFF):
-            invalid_key = DeviceKey(
-                DeviceType.THERMOSTAT,
-                invalid_room,
-                0,
-                SubType.NONE,
-            )
-            self.assertIsNone(self.gateway.registry.get(invalid_key))
+        broadcast_key = DeviceKey(DeviceType.THERMOSTAT, 0xFF, 0, SubType.NONE)
+        self.assertIsNone(self.gateway.registry.get(broadcast_key))
 
         self.gateway.controller._dispatch_packet(restored_mirror.raw)
         self.assertFalse(self.gateway.is_device_state_confirmed(key))
