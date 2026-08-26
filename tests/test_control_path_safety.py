@@ -112,6 +112,7 @@ def _install_homeassistant_shims() -> None:
     entity.DeviceInfo = _DeviceInfo
     entity_registry = _module("homeassistant.helpers.entity_registry")
     entity_registry.async_get = lambda hass: None
+    entity_registry.async_entries_for_config_entry = lambda registry, entry_id: []
     restore_state = _module("homeassistant.helpers.restore_state")
     restore_state.async_get = lambda hass: types.SimpleNamespace(last_states={})
     restore_state.RestoreEntity = _RestoreEntity
@@ -337,6 +338,25 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
         self.fail("bootstrap query task did not finish")
 
+    async def _restore_entity_entries(self, entries, last_states=None) -> None:
+        self.gateway.entry = types.SimpleNamespace(entry_id="entry")
+        registry = types.SimpleNamespace()
+        restore_store = types.SimpleNamespace(last_states=last_states or {})
+        with (
+            patch.object(gateway_module.er, "async_get", return_value=registry),
+            patch.object(
+                gateway_module.er,
+                "async_entries_for_config_entry",
+                return_value=entries,
+            ),
+            patch.object(
+                gateway_module.restore_state,
+                "async_get",
+                return_value=restore_store,
+            ),
+        ):
+            await self.gateway.async_get_entity_registry()
+
     async def test_waiter_is_registered_before_same_turn_reply(self):
         self.gateway.conn.on_send = lambda _packet: self.gateway.on_device_state(self._state(True))
         self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
@@ -436,6 +456,102 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.gateway._sync_connection_availability()
         await self._wait_for_bootstrap()
         self.assertEqual(4, len(self.gateway.conn.sent))
+
+    async def test_registry_only_climates_seed_queries_without_placeholder_state(self):
+        oversized_room = types.SimpleNamespace(
+            entity_id="climate.oversized_room",
+            unique_id=f"5-{'9' * 5000}_0-0:test",
+        )
+        valid = [
+            types.SimpleNamespace(
+                entity_id="climate.thermostat_1",
+                unique_id="5-1_0-0:test",
+            ),
+            types.SimpleNamespace(
+                entity_id="climate.thermostat_3",
+                unique_id="5-3_0-0:test:host",
+            ),
+        ]
+        invalid = [
+            oversized_room,
+            types.SimpleNamespace(entity_id="switch.other", unique_id="5-2_0-0:test"),
+            types.SimpleNamespace(entity_id="climate.zero", unique_id="5-0_0-0:test"),
+            types.SimpleNamespace(entity_id="climate.broadcast", unique_id="5-255_0-0:test"),
+            types.SimpleNamespace(entity_id="climate.leading_zero", unique_id="5-02_0-0:test"),
+            types.SimpleNamespace(entity_id="climate.device", unique_id="4-2_0-0:test"),
+            types.SimpleNamespace(entity_id="climate.index", unique_id="5-2_1-0:test"),
+            types.SimpleNamespace(entity_id="climate.subtype", unique_id="5-2_0-1:test"),
+            types.SimpleNamespace(entity_id="climate.alias", unique_id="5-2_0-0-extra:test"),
+            types.SimpleNamespace(entity_id="climate.nondigit", unique_id="5-x_0-0:test"),
+            types.SimpleNamespace(entity_id="climate.no_host", unique_id="5-2_0-0"),
+            types.SimpleNamespace(entity_id="climate.empty_host", unique_id="5-2_0-0:"),
+            types.SimpleNamespace(entity_id="malformed", unique_id="5-2_0-0:test"),
+            types.SimpleNamespace(entity_id=None, unique_id="5-2_0-0:test"),
+            types.SimpleNamespace(entity_id="climate.none", unique_id=None),
+        ]
+        last_states = {
+            entry.entity_id: types.SimpleNamespace(extra_data=None)
+            for entry in valid + invalid
+        }
+
+        # The oversized malformed entry precedes valid entries to prove it
+        # cannot abort parsing of the remaining entity registry.
+        entries = [oversized_room, *valid, *invalid[1:]]
+        await self._restore_entity_entries(entries, last_states)
+
+        self.assertEqual([], self.gateway.registry.all_by_platform(Platform.CLIMATE))
+        self.assertEqual(
+            {1, 3},
+            {key.room_index for key in self.gateway._bootstrap_registry_keys},
+        )
+        for room in (1, 3):
+            key = DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE)
+            self.assertFalse(self.gateway.is_device_state_confirmed(key))
+
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+        self.gateway._sync_connection_availability()
+        await self._wait_for_bootstrap()
+        self.assertEqual([1, 3], [packet[6] for packet in self.gateway.conn.sent])
+
+        first_key = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
+        third_key = DeviceKey(DeviceType.THERMOSTAT, 3, 0, SubType.NONE)
+        self.gateway.controller._dispatch_packet(
+            _thermostat_frame(22, 20, room=1).raw
+        )
+        self.assertIsNotNone(self.gateway.registry.get(first_key))
+        self.assertTrue(self.gateway.is_device_state_confirmed(first_key))
+        self.assertIsNone(self.gateway.registry.get(third_key))
+        self.assertFalse(self.gateway.is_device_state_confirmed(third_key))
+
+    async def test_packet_and_registry_bootstrap_keys_are_deduplicated(self):
+        room = 2
+        key = DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE)
+        self.gateway._restore_mode = True
+        self.gateway.controller._dispatch_packet(
+            _thermostat_frame(
+                21,
+                20,
+                room=room,
+                packet_type=0x0D,
+                mirrored=True,
+            ).raw
+        )
+        self.gateway._restore_mode = False
+        entry = types.SimpleNamespace(
+            entity_id="climate.thermostat_2",
+            unique_id="5-2_0-0:test",
+        )
+        await self._restore_entity_entries(
+            [entry],
+            {entry.entity_id: types.SimpleNamespace(extra_data=None)},
+        )
+
+        self.assertIsNotNone(self.gateway.registry.get(key))
+        self.assertFalse(self.gateway.is_device_state_confirmed(key))
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+        self.gateway._sync_connection_availability()
+        await self._wait_for_bootstrap()
+        self.assertEqual([room], [packet[6] for packet in self.gateway.conn.sent])
 
     async def test_bootstrap_query_does_not_retry_after_no_response(self):
         state = self._thermostat_state(1)

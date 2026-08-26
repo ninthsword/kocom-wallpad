@@ -21,6 +21,7 @@ from .const import (
     SEND_RETRY_MAX,
     SEND_RETRY_GAP,
     DeviceType,
+    SubType,
 )
 from .models import DeviceKey, DeviceState
 from .transport import AsyncConnection
@@ -137,6 +138,7 @@ class KocomGateway:
         self._connection_available: bool = False
         self._connection_generation: int = 0
         self._bootstrap_scheduled_generation: int | None = None
+        self._bootstrap_registry_keys: set[DeviceKey] = set()
 
     async def async_start(self) -> None:
         LOGGER.info("Starting gateway - %s:%s", self.host, self.port or "")
@@ -289,14 +291,20 @@ class KocomGateway:
             return
         if self._task_sender is None or not self.conn._is_connected():
             return
-        keys = [
-            dev.key
-            for dev in self.registry.all_by_platform(Platform.CLIMATE)
-            if dev.key.device_type == DeviceType.THERMOSTAT
-            and dev.key.device_index == 0
-            and dev.key.sub_type == 0
-            and 0x01 <= dev.key.room_index <= 0xFE
-        ]
+        keys_by_identity = {
+            key.key: key
+            for key in self._bootstrap_registry_keys
+        }
+        for dev in self.registry.all_by_platform(Platform.CLIMATE):
+            key = dev.key
+            if (
+                key.device_type == DeviceType.THERMOSTAT
+                and key.device_index == 0
+                and key.sub_type == SubType.NONE
+                and 0x01 <= key.room_index <= 0xFE
+            ):
+                keys_by_identity[key.key] = key
+        keys = [keys_by_identity[identity] for identity in sorted(keys_by_identity)]
         if keys:
             self._bootstrap_scheduled_generation = generation
             task = asyncio.create_task(
@@ -376,10 +384,46 @@ class KocomGateway:
         try:
             entity_registry = er.async_get(self.hass)
             entities = er.async_entries_for_config_entry(entity_registry, self.entry.entry_id)
+            self._bootstrap_registry_keys.clear()
             for entity in entities:
+                key = self._bootstrap_key_from_entity_entry(entity)
+                if key is not None:
+                    self._bootstrap_registry_keys.add(key)
                 await self._async_put_entity_dispatch_packet(entity.entity_id)
         finally:
             self._restore_mode = False
+
+    @staticmethod
+    def _bootstrap_key_from_entity_entry(entity: object) -> DeviceKey | None:
+        """Parse an exact primary thermostat key from a climate registry entry."""
+        entity_id = getattr(entity, "entity_id", "")
+        if not isinstance(entity_id, str):
+            return None
+        domain, separator, object_id = entity_id.partition(".")
+        if domain != Platform.CLIMATE.value or separator != "." or not object_id:
+            return None
+
+        unique_id = getattr(entity, "unique_id", "")
+        if not isinstance(unique_id, str):
+            return None
+        prefix, separator, host = unique_id.partition(":")
+        if separator != ":" or not host:
+            return None
+        if not prefix.startswith("5-") or not prefix.endswith("_0-0"):
+            return None
+        room_text = prefix[2:-4]
+        if (
+            not room_text
+            or len(room_text) > 3
+            or not room_text.isascii()
+            or not room_text.isdigit()
+            or (len(room_text) > 1 and room_text.startswith("0"))
+        ):
+            return None
+        room = int(room_text)
+        if not 0x01 <= room <= 0xFE or prefix != f"5-{room}_0-0":
+            return None
+        return DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE)
 
     def _notify_pendings(self, dev: DeviceState) -> None:
         if not self._pendings:
