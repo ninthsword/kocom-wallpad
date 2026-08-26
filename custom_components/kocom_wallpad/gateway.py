@@ -32,6 +32,7 @@ class _CmdItem:
     key: DeviceKey
     action: str
     kwargs: dict
+    connection_generation: int | None = None
     future: asyncio.Future = field(default_factory=lambda: asyncio.get_running_loop().create_future())
 
 
@@ -124,6 +125,8 @@ class KocomGateway:
         self._tx_queue: asyncio.Queue[_CmdItem] = asyncio.Queue()
         self._task_reader: asyncio.Task | None = None
         self._task_sender: asyncio.Task | None = None
+        self._task_bootstrap_queries: asyncio.Task | None = None
+        self._bootstrap_query_tasks: set[asyncio.Task] = set()
         self._pendings: list[_PendingWaiter] = []
         self._last_rx_monotonic: float = 0.0
         self._last_tx_monotonic: float = 0.0
@@ -132,15 +135,17 @@ class KocomGateway:
         self._live_device_keys: set[Tuple[int, int, int, int]] = set()
         self._active_item: _CmdItem | None = None
         self._connection_available: bool = False
+        self._connection_generation: int = 0
+        self._bootstrap_scheduled_generation: int | None = None
 
     async def async_start(self) -> None:
         LOGGER.info("Starting gateway - %s:%s", self.host, self.port or "")
         await self.conn.open()
-        self._sync_connection_availability()
         self._last_rx_monotonic = self.conn.idle_since()
         self._last_tx_monotonic = self.conn.idle_since()
         self._task_reader = asyncio.create_task(self._read_loop())
         self._task_sender = asyncio.create_task(self._sender_loop())
+        self._sync_connection_availability()
 
     async def async_stop(self, event: Event | None = None) -> None:
         LOGGER.info("Stopping gateway - %s:%s", self.host, self.port or "")
@@ -148,6 +153,7 @@ class KocomGateway:
             self._task_reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task_reader
+        await self._cancel_bootstrap_queries()
         if self._task_sender:
             self._task_sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -182,6 +188,22 @@ class KocomGateway:
 
     async def async_send_action(self, key: DeviceKey, action: str, **kwargs) -> bool:
         item = _CmdItem(key=key, action=action, kwargs=kwargs)
+        return await self._async_queue_item(item)
+
+    async def _async_send_status_query(
+        self,
+        key: DeviceKey,
+        connection_generation: int,
+    ) -> bool:
+        item = _CmdItem(
+            key=key,
+            action="status_query",
+            kwargs={},
+            connection_generation=connection_generation,
+        )
+        return await self._async_queue_item(item)
+
+    async def _async_queue_item(self, item: _CmdItem) -> bool:
         await self._tx_queue.put(item)
         try:
             res = await item.future   # 워커가 set_result(True/False)
@@ -228,18 +250,30 @@ class KocomGateway:
 
     def is_device_available(self, key: DeviceKey) -> bool:
         """A restored state is display-only until a live packet confirms it."""
-        return self.conn._is_connected() and key.key in self._live_device_keys
+        return self.is_transport_available() and self.is_device_state_confirmed(key)
+
+    def is_transport_available(self) -> bool:
+        """Return whether the gateway can currently send a confirmed command."""
+        return self.conn._is_connected()
+
+    def is_device_state_confirmed(self, key: DeviceKey) -> bool:
+        """Return whether this device reported state in the current connection."""
+        return key.key in self._live_device_keys
 
     def _sync_connection_availability(self) -> None:
         """Refresh existing entities only when connection availability changes."""
         connected = self.conn._is_connected()
         if connected == self._connection_available:
             return
+        self._connection_generation += 1
         if self._connection_available and not connected:
             # A new socket session must receive a fresh physical report before
             # any restored or previously-live entity is considered available.
             self._live_device_keys.clear()
+            self._cancel_bootstrap_queries_soon()
         self._connection_available = connected
+        if connected:
+            self._schedule_bootstrap_queries()
         for platform_states in self.registry.by_platform.values():
             for dev in platform_states.values():
                 async_dispatcher_send(
@@ -247,6 +281,66 @@ class KocomGateway:
                     self.async_signal_device_updated(dev.key.unique_id),
                     dev,
                 )
+
+    def _schedule_bootstrap_queries(self) -> None:
+        """Query each known primary thermostat once per socket session."""
+        generation = self._connection_generation
+        if self._bootstrap_scheduled_generation == generation:
+            return
+        if self._task_sender is None or not self.conn._is_connected():
+            return
+        keys = [
+            dev.key
+            for dev in self.registry.all_by_platform(Platform.CLIMATE)
+            if dev.key.device_type == DeviceType.THERMOSTAT
+            and dev.key.device_index == 0
+            and dev.key.sub_type == 0
+            and 0x01 <= dev.key.room_index <= 0xFE
+        ]
+        if keys:
+            self._bootstrap_scheduled_generation = generation
+            task = asyncio.create_task(
+                self._async_bootstrap_queries(keys, generation)
+            )
+            self._task_bootstrap_queries = task
+            self._bootstrap_query_tasks.add(task)
+            task.add_done_callback(self._bootstrap_query_tasks.discard)
+
+    async def _async_bootstrap_queries(
+        self,
+        keys: list[DeviceKey],
+        connection_generation: int,
+    ) -> None:
+        """Send one sequential directed status request for every known room."""
+        try:
+            for key in keys:
+                if (
+                    not self.conn._is_connected()
+                    or connection_generation != self._connection_generation
+                ):
+                    return
+                await self._async_send_status_query(key, connection_generation)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._task_bootstrap_queries is asyncio.current_task():
+                self._task_bootstrap_queries = None
+
+    def _cancel_bootstrap_queries_soon(self) -> None:
+        task = self._task_bootstrap_queries
+        self._task_bootstrap_queries = None
+        if task and not task.done():
+            task.cancel()
+
+    async def _cancel_bootstrap_queries(self) -> None:
+        self._cancel_bootstrap_queries_soon()
+        tasks = tuple(self._bootstrap_query_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._bootstrap_query_tasks.clear()
+        self._task_bootstrap_queries = None
 
     @callback
     def async_signal_new_device(self, platform: Platform) -> str:
@@ -349,85 +443,126 @@ class KocomGateway:
                 item.future.set_result(result)
             self._tx_queue.task_done()
 
+    def _is_current_status_query(self, item: _CmdItem) -> bool:
+        return (
+            not item.future.done()
+            and self.conn._is_connected()
+            and item.connection_generation == self._connection_generation
+        )
+
     async def _sender_loop(self) -> None:
         LOGGER.debug("Starting sender loop")
         try:
             while True:
                 item = await self._tx_queue.get()
-                if item is None:
-                    continue
-
                 self._active_item = item
-                # generate packet & expect predicate
                 try:
-                    packet, expect_predicate, timeout = self.controller.generate_command(
-                        item.key, item.action, **item.kwargs
-                    )
-                except Exception as e:
-                    LOGGER.exception("generate_command failed: %s", e)
-                    if not item.future.done():
-                        item.future.set_result(False)
-                    self._tx_queue.task_done()
-                    self._active_item = None
-                    continue
+                    if item is None or item.future.done():
+                        continue
 
-                # 재시도 루프
-                success = False
-                for attempt in range(1, SEND_RETRY_MAX + 1):
-                    # idle 대기 (최대 1초)
-                    LOGGER.debug("TX idle wait (max 1.0s) before '%s'...", item.action)
-                    t0 = asyncio.get_running_loop().time()
-                    while not self.is_idle():
-                        await asyncio.sleep(0.01)
-                        if asyncio.get_running_loop().time() - t0 > 1.0:
-                            LOGGER.debug("Idle wait timeout (%.2fs).", asyncio.get_running_loop().time() - t0)
-                            break
-
-                    # 연결 확인
-                    if not self.conn._is_connected():
-                        LOGGER.warning("Connection not ready. '%s' abort.", item.action)
-                        break
-
-                    # Register before sending: a wallpad can acknowledge in
-                    # the same event-loop turn as drain().
-                    waiter = self._register_confirmation(item.key, expect_predicate)
-
-                    # 전송
+                    # Generate the packet and its confirmation predicate.
                     try:
-                        await self.conn.send(packet)
+                        packet, expect_predicate, timeout = self.controller.generate_command(
+                            item.key, item.action, **item.kwargs
+                        )
                     except Exception as e:
-                        if waiter in self._pendings:
-                            self._pendings.remove(waiter)
-                        LOGGER.warning("Send failed on attempt %d: %s", attempt, e)
-                        if attempt < SEND_RETRY_MAX:
-                            await asyncio.sleep(SEND_RETRY_GAP)
-                            continue
-                        else:
+                        LOGGER.exception("generate_command failed: %s", e)
+                        if not item.future.done():
+                            item.future.set_result(False)
+                        continue
+
+                    if item.action == "status_query":
+                        success = False
+                        if self._is_current_status_query(item):
+                            try:
+                                t0 = asyncio.get_running_loop().time()
+                                while not self.is_idle():
+                                    if not self._is_current_status_query(item):
+                                        break
+                                    await asyncio.sleep(0.01)
+                                    if asyncio.get_running_loop().time() - t0 > 1.0:
+                                        break
+                                if self._is_current_status_query(item):
+                                    await self.conn.send(packet)
+                                    self._last_tx_monotonic = asyncio.get_running_loop().time()
+                                    success = True
+                            except Exception as e:
+                                LOGGER.warning("Status query send failed: %s", e)
+                        if not item.future.done():
+                            item.future.set_result(success)
+                        continue
+
+                    success = False
+                    for attempt in range(1, SEND_RETRY_MAX + 1):
+                        LOGGER.debug("TX idle wait (max 1.0s) before '%s'...", item.action)
+                        t0 = asyncio.get_running_loop().time()
+                        while not self.is_idle():
+                            await asyncio.sleep(0.01)
+                            if asyncio.get_running_loop().time() - t0 > 1.0:
+                                LOGGER.debug(
+                                    "Idle wait timeout (%.2fs).",
+                                    asyncio.get_running_loop().time() - t0,
+                                )
+                                break
+
+                        if not self.conn._is_connected():
+                            LOGGER.warning("Connection not ready. '%s' abort.", item.action)
                             break
 
-                    self._last_tx_monotonic = asyncio.get_running_loop().time()
+                        # Register before sending: a wallpad can acknowledge in
+                        # the same event-loop turn as drain().
+                        waiter = self._register_confirmation(item.key, expect_predicate)
 
-                    # 확인 대기
-                    try:
-                        _ = await self._wait_for_confirmation(waiter, timeout)
-                        LOGGER.debug("Command '%s' confirmed (attempt %d).", item.action, attempt)
-                        success = True
-                        break
-                    except asyncio.TimeoutError:
-                        if attempt < SEND_RETRY_MAX:
-                            LOGGER.warning(
-                                "No confirmation for '%s' (attempt %d/%d). Retrying in %.2fs...",
-                                item.action, attempt, SEND_RETRY_MAX, SEND_RETRY_GAP
+                        try:
+                            await self.conn.send(packet)
+                        except Exception as e:
+                            if waiter in self._pendings:
+                                self._pendings.remove(waiter)
+                            LOGGER.warning("Send failed on attempt %d: %s", attempt, e)
+                            if attempt < SEND_RETRY_MAX:
+                                await asyncio.sleep(SEND_RETRY_GAP)
+                                continue
+                            break
+
+                        self._last_tx_monotonic = asyncio.get_running_loop().time()
+
+                        try:
+                            await self._wait_for_confirmation(waiter, timeout)
+                            LOGGER.debug(
+                                "Command '%s' confirmed (attempt %d).",
+                                item.action,
+                                attempt,
                             )
-                            await asyncio.sleep(SEND_RETRY_GAP)
-                        else:
-                            LOGGER.error("Command '%s' failed after %d attempts.", item.action, SEND_RETRY_MAX)
+                            success = True
+                            break
+                        except asyncio.TimeoutError:
+                            if attempt < SEND_RETRY_MAX:
+                                LOGGER.warning(
+                                    "No confirmation for '%s' (attempt %d/%d). "
+                                    "Retrying in %.2fs...",
+                                    item.action,
+                                    attempt,
+                                    SEND_RETRY_MAX,
+                                    SEND_RETRY_GAP,
+                                )
+                                await asyncio.sleep(SEND_RETRY_GAP)
+                            else:
+                                LOGGER.error(
+                                    "Command '%s' failed after %d attempts.",
+                                    item.action,
+                                    SEND_RETRY_MAX,
+                                )
 
-                if not item.future.done():
-                    item.future.set_result(success)
-
-                self._tx_queue.task_done()
-                self._active_item = None
+                    if not item.future.done():
+                        item.future.set_result(success)
+                except asyncio.CancelledError:
+                    if item is not None and not item.future.done():
+                        item.future.set_result(False)
+                    raise
+                finally:
+                    self._tx_queue.task_done()
+                    if self._active_item is item:
+                        self._active_item = None
         except asyncio.CancelledError:
             LOGGER.debug("Sender loop cancelled")
             self._resolve_queued(False)

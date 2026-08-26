@@ -220,7 +220,14 @@ class KocomController:
 
     def _handle_thermostat(self, frame: PacketFrame) -> List[DeviceState]:
         states: List[DeviceState] = []
-        if frame.command == 0x00:
+        # Only a thermostat-to-wallpad status report is physical evidence. An
+        # echoed wallpad command must not confirm a thermostat state.
+        if (
+            frame.packet_type == 0x0D
+            and frame.dest == b"\x01\x00"
+            and frame.src[0] == 0x36
+            and frame.command == 0x00
+        ):
             key = DeviceKey(
                 device_type=frame.dev_type,
                 room_index=frame.dev_room,
@@ -621,7 +628,13 @@ class KocomController:
         command = bytes([0x00])
         data = bytearray(8)
 
-        if device_type in (DeviceType.LIGHT, DeviceType.OUTLET):
+        if action == "status_query":
+            if device_type != DeviceType.THERMOSTAT:
+                raise ValueError("Status query is supported only for thermostats")
+            if not 0x01 <= room_index <= 0xFE:
+                raise ValueError("Status query requires a physical thermostat room")
+            command = bytes([0x3A])
+        elif device_type in (DeviceType.LIGHT, DeviceType.OUTLET):
             data = self._generate_switch(key, action, data)
         elif device_type == DeviceType.VENTILATION:
             data = self._generate_ventilation(action, data, **kwargs)
@@ -684,6 +697,8 @@ class KocomController:
             tt = self._encode_whole_temperature(kwargs["target_temp"])
             data[0] = 0x11
             data[2] = tt
+        else:
+            raise ValueError(f"Unsupported thermostat action: {action}")
         return data
 
     @staticmethod

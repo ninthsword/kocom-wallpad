@@ -105,4 +105,10 @@ class AsyncConnection:
             return b""
         if chunk:
             self._touch()
+        elif self.port is not None:
+            # StreamReader.read() returns b"" only for an orderly TCP EOF.
+            # A timeout is handled above, while serial's empty-read behavior
+            # remains unchanged.
+            LOGGER.info("TCP peer closed the connection")
+            await self.close()
         return chunk
