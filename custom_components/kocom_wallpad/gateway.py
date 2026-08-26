@@ -32,7 +32,7 @@ class _CmdItem:
     key: DeviceKey
     action: str
     kwargs: dict
-    future: asyncio.Future = field(default_factory=asyncio.get_running_loop().create_future)
+    future: asyncio.Future = field(default_factory=lambda: asyncio.get_running_loop().create_future())
 
 
 class _PendingWaiter:
@@ -129,10 +129,14 @@ class KocomGateway:
         self._last_tx_monotonic: float = 0.0
         self._restore_mode: bool = False
         self._force_register_uid: str | None = None
+        self._live_device_keys: set[Tuple[int, int, int, int]] = set()
+        self._active_item: _CmdItem | None = None
+        self._connection_available: bool = False
 
     async def async_start(self) -> None:
         LOGGER.info("Starting gateway - %s:%s", self.host, self.port or "")
         await self.conn.open()
+        self._sync_connection_availability()
         self._last_rx_monotonic = self.conn.idle_since()
         self._last_tx_monotonic = self.conn.idle_since()
         self._task_reader = asyncio.create_task(self._read_loop())
@@ -148,6 +152,8 @@ class KocomGateway:
             self._task_sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task_sender
+        self._resolve_pending(False)
+        self._resolve_queued(False)
         await self.conn.close()
 
     def is_idle(self) -> bool:
@@ -158,12 +164,18 @@ class KocomGateway:
             LOGGER.debug("Starting read loop")
             while True:
                 if not self.conn._is_connected():
-                    await asyncio.sleep(5)
+                    self._sync_connection_availability()
+                    await self.conn.open()
+                    self._sync_connection_availability()
+                    if not self.conn._is_connected():
+                        await asyncio.sleep(5)
                     continue
                 chunk = await self.conn.recv(512, RECV_POLL_SEC)
                 if chunk:
                     self._last_rx_monotonic = asyncio.get_running_loop().time()
                     self.controller.feed(chunk)
+                elif not self.conn._is_connected():
+                    self._sync_connection_availability()
         except asyncio.CancelledError:
             LOGGER.debug("Read loop cancelled")
             raise
@@ -181,6 +193,11 @@ class KocomGateway:
             raise
 
     def on_device_state(self, dev: DeviceState) -> None:  
+        is_live = not self._restore_mode and self.conn._is_connected()
+        availability_changed = False
+        if is_live and dev.key.key not in self._live_device_keys:
+            self._live_device_keys.add(dev.key.key)
+            availability_changed = True
         allow_insert = True
         if dev.key.device_type in (DeviceType.LIGHT, DeviceType.OUTLET):
             allow_insert = bool(getattr(dev, "_is_register", True))
@@ -195,17 +212,41 @@ class KocomGateway:
                 self.async_signal_new_device(dev.platform),
                 [dev],
             )
-            self._notify_pendings(dev)
+            if is_live:
+                self._notify_pendings(dev)
             return
 
-        if changed:
+        if changed or availability_changed:
             LOGGER.debug("Device state has been changed. Update -> %s", dev.key)
             async_dispatcher_send(
                 self.hass,
                 self.async_signal_device_updated(dev.key.unique_id),
                 dev,
             )
-        self._notify_pendings(dev)
+        if is_live:
+            self._notify_pendings(dev)
+
+    def is_device_available(self, key: DeviceKey) -> bool:
+        """A restored state is display-only until a live packet confirms it."""
+        return self.conn._is_connected() and key.key in self._live_device_keys
+
+    def _sync_connection_availability(self) -> None:
+        """Refresh existing entities only when connection availability changes."""
+        connected = self.conn._is_connected()
+        if connected == self._connection_available:
+            return
+        if self._connection_available and not connected:
+            # A new socket session must receive a fresh physical report before
+            # any restored or previously-live entity is considered available.
+            self._live_device_keys.clear()
+        self._connection_available = connected
+        for platform_states in self.registry.by_platform.values():
+            for dev in platform_states.values():
+                async_dispatcher_send(
+                    self.hass,
+                    self.async_signal_device_updated(dev.key.unique_id),
+                    dev,
+                )
 
     @callback
     def async_signal_new_device(self, platform: Platform) -> str:
@@ -266,15 +307,20 @@ class KocomGateway:
                 except ValueError:
                     pass
 
-    async def _wait_for_confirmation(
+    def _register_confirmation(
         self,
         key: DeviceKey,
         predicate: Callable[[DeviceState], bool],
+    ) -> _PendingWaiter:
+        waiter = _PendingWaiter(key, predicate, asyncio.get_running_loop())
+        self._pendings.append(waiter)
+        return waiter
+
+    async def _wait_for_confirmation(
+        self,
+        waiter: _PendingWaiter,
         timeout: float,
     ) -> DeviceState:
-        loop = asyncio.get_running_loop()
-        waiter = _PendingWaiter(key, predicate, loop)
-        self._pendings.append(waiter)
         try:
             return await asyncio.wait_for(waiter.future, timeout=timeout)
         finally:
@@ -285,6 +331,24 @@ class KocomGateway:
                 except ValueError:
                     pass
 
+    def _resolve_pending(self, result: bool) -> None:
+        for waiter in self._pendings:
+            if not waiter.future.done():
+                waiter.future.set_result(result)
+        self._pendings.clear()
+
+    def _resolve_queued(self, result: bool) -> None:
+        if self._active_item is not None and not self._active_item.future.done():
+            self._active_item.future.set_result(result)
+        while True:
+            try:
+                item = self._tx_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not item.future.done():
+                item.future.set_result(result)
+            self._tx_queue.task_done()
+
     async def _sender_loop(self) -> None:
         LOGGER.debug("Starting sender loop")
         try:
@@ -293,6 +357,7 @@ class KocomGateway:
                 if item is None:
                     continue
 
+                self._active_item = item
                 # generate packet & expect predicate
                 try:
                     packet, expect_predicate, timeout = self.controller.generate_command(
@@ -303,6 +368,7 @@ class KocomGateway:
                     if not item.future.done():
                         item.future.set_result(False)
                     self._tx_queue.task_done()
+                    self._active_item = None
                     continue
 
                 # 재시도 루프
@@ -322,10 +388,16 @@ class KocomGateway:
                         LOGGER.warning("Connection not ready. '%s' abort.", item.action)
                         break
 
+                    # Register before sending: a wallpad can acknowledge in
+                    # the same event-loop turn as drain().
+                    waiter = self._register_confirmation(item.key, expect_predicate)
+
                     # 전송
                     try:
                         await self.conn.send(packet)
                     except Exception as e:
+                        if waiter in self._pendings:
+                            self._pendings.remove(waiter)
                         LOGGER.warning("Send failed on attempt %d: %s", attempt, e)
                         if attempt < SEND_RETRY_MAX:
                             await asyncio.sleep(SEND_RETRY_GAP)
@@ -337,7 +409,7 @@ class KocomGateway:
 
                     # 확인 대기
                     try:
-                        _ = await self._wait_for_confirmation(item.key, expect_predicate, timeout)
+                        _ = await self._wait_for_confirmation(waiter, timeout)
                         LOGGER.debug("Command '%s' confirmed (attempt %d).", item.action, attempt)
                         success = True
                         break
@@ -355,6 +427,8 @@ class KocomGateway:
                     item.future.set_result(success)
 
                 self._tx_queue.task_done()
+                self._active_item = None
         except asyncio.CancelledError:
             LOGGER.debug("Sender loop cancelled")
+            self._resolve_queued(False)
             raise

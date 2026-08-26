@@ -26,9 +26,14 @@ class AsyncConnection:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._last_activity_mono: float = time.monotonic()
         self._last_reconn_delay: float = 0.0
-        self._connected = True
+        self._connected = False
 
-    async def open(self) -> None:
+    async def open(self) -> bool:
+        """Make one connection attempt.
+
+        Reconnect scheduling deliberately belongs to ``KocomGateway`` so a
+        failed startup cannot recurse through ``open -> reconnect -> open``.
+        """
         try:
             if self.port is None:
                 self._reader, self._writer = await serial_asyncio.open_serial_connection(
@@ -43,9 +48,13 @@ class AsyncConnection:
                 LOGGER.info("Connection opened for socket: %s:%s", self.host, self.port)
             self._connected = True
             self._touch()
+            return True
         except Exception as e:
             LOGGER.warning("Connection open failed: %r", e)
-            await self.reconnect()
+            self._connected = False
+            self._reader = None
+            self._writer = None
+            return False
 
     async def close(self) -> None:
         if self._writer is not None:
@@ -80,8 +89,8 @@ class AsyncConnection:
             return len(data)
         except Exception as e:
             LOGGER.warning("Send failed: %r", e)
-            await self.reconnect()
-            return 0
+            await self.close()
+            raise
 
     async def recv(self, nbytes: int, timeout: float = 0.05) -> bytes:
         if not self._reader:
@@ -92,29 +101,8 @@ class AsyncConnection:
             return b""
         except Exception as e:
             LOGGER.warning("Recv failed: %r", e)
-            await self.reconnect()
+            await self.close()
             return b""
         if chunk:
             self._touch()
         return chunk
-
-    async def reconnect(self) -> None:
-        self._connected = False
-        delay_min, delay_max = self.reconnect_backoff
-        if self._last_reconn_delay > 0.0:
-            delay = self._last_reconn_delay
-        else:
-            delay = delay_min
-
-        if self._writer is not None:
-            self._writer.close()
-            await self._writer.wait_closed()
-        
-        LOGGER.info("Connection lost. Reconnecting in %.1f sec...", delay)
-        await asyncio.sleep(delay)
-        self._last_reconn_delay = min(delay * 2, delay_max)
-        await self.open()
-
-        if self._is_connected():
-            LOGGER.info("Connection reconnected")
-            self._last_reconn_delay = delay_min

@@ -16,6 +16,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.exceptions import HomeAssistantError
 
 from .gateway import KocomGateway
 from .models import DeviceState
@@ -140,16 +141,22 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
     
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         args = {"hvac_mode": hvac_mode}
-        await self.gateway.async_send_action(self._device.key, "set_hvac", **args)
+        await self._async_send_or_raise("set HVAC mode", "set_hvac", **args)
         
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         args = {"fan_mode": fan_mode}
-        await self.gateway.async_send_action(self._device.key, "set_fan", **args)
+        await self._async_send_or_raise("set fan mode", "set_fan", **args)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         args = {"preset_mode": preset_mode}
-        await self.gateway.async_send_action(self._device.key, "set_preset", **args)
+        await self._async_send_or_raise("set preset mode", "set_preset", **args)
 
     async def async_set_temperature(self, **kwargs) -> None:
         args = {"target_temp": float(kwargs[ATTR_TEMPERATURE])}
-        await self.gateway.async_send_action(self._device.key, "set_temperature", **args)
+        await self._async_send_or_raise("set temperature", "set_temperature", **args)
+
+    async def _async_send_or_raise(self, description: str, action: str, **args) -> None:
+        if not self.available:
+            raise HomeAssistantError("Kocom wallpad is unavailable")
+        if not await self.gateway.async_send_action(self._device.key, action, **args):
+            raise HomeAssistantError(f"Kocom wallpad could not {description}")

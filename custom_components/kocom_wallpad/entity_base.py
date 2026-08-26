@@ -102,6 +102,10 @@ class KocomBaseEntity(RestoreEntity):
         self.async_write_ha_state()
 
     @property
+    def available(self) -> bool:
+        return self.gateway.is_device_available(self._device.key)
+
+    @property
     def extra_restore_state_data(self) -> RestoredExtraData:
         return RestoredExtraData({
             "packet": getattr(self._device, "_packet", bytes()).hex(),

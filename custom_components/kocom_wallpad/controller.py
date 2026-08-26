@@ -235,26 +235,23 @@ class KocomController:
             heat_temp = frame.payload[5]
             error_code = frame.payload[6]
 
+            # The thermostat protocol carries whole-degree values.  Keep the
+            # cache only as a restore aid; a valid report must always win.
+            self._device_storage[f"{key.unique_id}_thermo_target"] = target_temp
+            self._device_storage[f"{key.unique_id}_thermo_current"] = current_temp
+
             attribute = {
                 "hvac_modes": [HVACMode.HEAT, HVACMode.OFF],
                 "feature_preset": True,
                 "preset_modes": [PRESET_AWAY, PRESET_NONE],
-                "temp_step": self._device_storage.get(f"{key.unique_id}_thermo_step", 1.0),
+                "temp_step": 1.0,
             }
             state = {
                 "hvac_mode": havc_mode,
                 "preset_mode": preset_mode,
-                "target_temp": self._device_storage.get(f"{key.unique_id}_thermo_target", target_temp),
-                "current_temp": self._device_storage.get(f"{key.unique_id}_thermo_current", current_temp),
+                "target_temp": target_temp,
+                "current_temp": current_temp,
             }
-            if target_temp % 1 == 0.5 and self._device_storage.get(f"{key.unique_id}_thermo_step") != 0.5:
-                LOGGER.debug("0.5°C step detected, heating supports 0.5 increments.")
-                self._device_storage[f"{key.unique_id}_thermo_step"] = 0.5
-            if target_temp != 0 and current_temp != 0:
-                if havc_mode == HVACMode.HEAT and self._device_storage.get(f"{key.unique_id}_thermo_target") != target_temp:
-                    LOGGER.debug(f"User target temperature update: {target_temp}")
-                    self._device_storage[f"{key.unique_id}_thermo_target"] = target_temp
-                self._device_storage[f"{key.unique_id}_thermo_current"] = current_temp
             dev = DeviceState(key=key, platform=Platform.CLIMATE, attribute=attribute, state=state)
             states.append(dev)
             
@@ -673,7 +670,7 @@ class KocomController:
         else:
             data[0] = 0x11 if action == "turn_on" else 0x00
         return data
-    
+
     def _generate_thermostat(self, action: str, data: bytes, **kwargs: Any) -> bytes:
         if action == "set_hvac":
             hm = kwargs["hvac_mode"]
@@ -684,10 +681,26 @@ class KocomController:
             data[0] = 0x11
             data[1] = 0x01 if pm == PRESET_AWAY else 0x00
         elif action == "set_temperature":
-            tt = kwargs["target_temp"]
+            tt = self._encode_whole_temperature(kwargs["target_temp"])
             data[0] = 0x11
-            data[2] = int(tt)
+            data[2] = tt
         return data
+
+    @staticmethod
+    def _encode_whole_temperature(value: Any) -> int:
+        """Return a protocol-safe whole-degree temperature without truncation."""
+        if isinstance(value, bool):
+            raise ValueError("Target temperature must be a whole degree")
+        try:
+            temperature = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Target temperature must be a whole degree") from exc
+        if not temperature.is_integer():
+            raise ValueError("Target temperature must be a whole degree")
+        encoded = int(temperature)
+        if not 0 <= encoded <= 255:
+            raise ValueError("Target temperature is outside the protocol range")
+        return encoded
     
     def _generate_airconditioner(self, action: str, data: bytes, **kwargs: Any) -> bytes:
         if action == "set_hvac":
@@ -702,8 +715,7 @@ class KocomController:
             data[0] = 0x10
             data[2] = REV_AC_FAN_MAP[fm]
         elif action == "set_temperature":
-            tt = kwargs["target_temp"]
+            tt = self._encode_whole_temperature(kwargs["target_temp"])
             data[0] = 0x10
-            data[5] = int(tt)
+            data[5] = tt
         return data
-    
