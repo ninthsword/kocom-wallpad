@@ -223,7 +223,7 @@ class KocomController:
         # Only a thermostat-to-wallpad status report is physical evidence. An
         # echoed wallpad command must not confirm a thermostat state.
         if (
-            frame.packet_type == 0x0D
+            frame.packet_type == 0x0B
             and frame.dest == b"\x01\x00"
             and frame.src[0] == 0x36
             and frame.command == 0x00

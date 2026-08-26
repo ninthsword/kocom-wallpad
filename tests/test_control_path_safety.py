@@ -160,16 +160,21 @@ def _thermostat_frame(
     current: int,
     *,
     room: int = 1,
-    packet_type: int = 0x0D,
+    packet_type: int = 0x0B,
     command: int = 0x00,
     dest_device: int = 0x01,
     dest_room: int = 0x00,
+    mirrored: bool = False,
 ) -> PacketFrame:
     raw = bytearray(21)
     raw[:2] = bytes((0xAA, 0x55))
     raw[2:5] = bytes((0x30, (packet_type << 4) | 0x0C, 0x00))
-    raw[5:7] = bytes((dest_device, dest_room))
-    raw[7:9] = bytes((0x36, room))
+    if mirrored:
+        raw[5:7] = bytes((0x36, room))
+        raw[7:9] = bytes((0x01, 0x00))
+    else:
+        raw[5:7] = bytes((dest_device, dest_room))
+        raw[7:9] = bytes((0x36, room))
     raw[9] = command
     raw[10:18] = bytes((0x10, 0x00, target, 0, current, 0, 0, 0))
     raw[18] = sum(raw[2:18]) % 256
@@ -257,7 +262,7 @@ class ControllerSafetyTests(unittest.TestCase):
         controller = KocomController(_ControllerGateway())
 
         self.assertFalse(controller._handle_thermostat(
-            _thermostat_frame(21, 20, packet_type=0x0B)
+            _thermostat_frame(21, 20, packet_type=0x0D, mirrored=True)
         ))
         self.assertFalse(controller._handle_thermostat(
             _thermostat_frame(21, 20, command=0x3A)
@@ -271,6 +276,28 @@ class ControllerSafetyTests(unittest.TestCase):
         states = controller._handle_thermostat(_thermostat_frame(21, 20))
         primary = next(state for state in states if state.key.sub_type == SubType.NONE)
         self.assertEqual(1, primary.key.room_index)
+
+    def test_captured_bc_status_is_accepted_and_dc_mirror_is_rejected(self):
+        controller = KocomController(_ControllerGateway())
+        captured_status = _thermostat_frame(21, 20)
+        captured_mirror = _thermostat_frame(
+            21,
+            20,
+            packet_type=0x0D,
+            mirrored=True,
+        )
+
+        self.assertEqual(
+            bytes.fromhex("aa5530bc00010036010010001500140000005d0d0d"),
+            captured_status.raw,
+        )
+        self.assertEqual(
+            bytes.fromhex("aa5530dc00360101000010001500140000007d0d0d"),
+            captured_mirror.raw,
+        )
+        states = controller._handle_thermostat(captured_status)
+        self.assertTrue(states)
+        self.assertFalse(controller._handle_thermostat(captured_mirror))
 
 
 class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
@@ -577,7 +604,13 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.gateway.is_device_state_confirmed(second.key))
 
         self.gateway.controller._dispatch_packet(
-            _thermostat_frame(22, 20, room=2, packet_type=0x0B).raw
+            _thermostat_frame(
+                22,
+                20,
+                room=2,
+                packet_type=0x0D,
+                mirrored=True,
+            ).raw
         )
         self.assertFalse(self.gateway.is_device_state_confirmed(second.key))
 
