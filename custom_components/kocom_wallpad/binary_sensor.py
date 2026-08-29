@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
 from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
     BinarySensorEntity,
-    BinarySensorDeviceClass
 )
-
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import DOMAIN
+from .entity_base import KocomBaseEntity
 from .gateway import KocomGateway
 from .models import DeviceState
-from .entity_base import KocomBaseEntity
-from .const import DOMAIN, LOGGER
 
 
 async def async_setup_entry(
@@ -35,7 +34,7 @@ async def async_setup_entry(
         if devices is None:
             devices = gateway.get_devices_from_platform(Platform.BINARY_SENSOR)
 
-        entities: List[KocomBinarySensor] = []
+        entities: list[KocomBinarySensor] = []
         for dev in devices:
             entity = KocomBinarySensor(gateway, dev)
             entities.append(entity)

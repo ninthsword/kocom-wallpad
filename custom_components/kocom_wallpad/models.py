@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Tuple, Union
+from typing import Any
 
-from homeassistant.const import Platform
 from homeassistant.components.climate.const import (
-    HVACMode,
+    FAN_AUTO,
+    FAN_HIGH,
     FAN_LOW,
     FAN_MEDIUM,
-    FAN_HIGH,
-    FAN_AUTO,
+    HVACMode,
 )
+from homeassistant.const import Platform
 
 from .const import DeviceType, SubType
-
 
 DEVICE_TYPE_MAP = {
     0x0E: DeviceType.LIGHT,
@@ -73,7 +72,7 @@ class DeviceKey:
         return f"{self.device_type.value}-{self.room_index}_{self.device_index}-{self.sub_type.value}"
 
     @property
-    def key(self) -> Tuple[int, int, int, int]:
+    def key(self) -> tuple[int, int, int, int]:
         return (self.device_type.value, self.room_index, self.device_index, self.sub_type.value)
 
 
@@ -83,4 +82,4 @@ class DeviceState:
     key: DeviceKey
     platform: Platform
     attribute: dict[str, Any] 
-    state: Union[dict[str, Any], bool, int, float, str]
+    state: dict[str, Any] | bool | int | float | str
