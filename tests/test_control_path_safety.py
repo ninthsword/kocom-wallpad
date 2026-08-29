@@ -7,10 +7,12 @@ these tests use only the narrow module shims needed by the protocol gateway.
 from __future__ import annotations
 
 import asyncio
-from enum import Enum, IntFlag
+import json
 import sys
 import types
 import unittest
+from enum import Enum, IntFlag
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 
@@ -126,6 +128,8 @@ def _install_homeassistant_shims() -> None:
     entity_registry = _module("homeassistant.helpers.entity_registry")
     entity_registry.async_get = lambda hass: None
     entity_registry.async_entries_for_config_entry = lambda registry, entry_id: []
+    device_registry = _module("homeassistant.helpers.device_registry")
+    device_registry.async_get = lambda hass: None
     restore_state = _module("homeassistant.helpers.restore_state")
     restore_state.async_get = lambda hass: types.SimpleNamespace(last_states={})
     restore_state.RestoreEntity = _RestoreEntity
@@ -139,9 +143,10 @@ def _install_homeassistant_shims() -> None:
     exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
     helpers.entity = entity
     helpers.entity_registry = entity_registry
+    helpers.device_registry = device_registry
     helpers.restore_state = restore_state
     helpers.dispatcher = dispatcher
-    _module("serial_asyncio").open_serial_connection = None
+    _module("serial_asyncio_fast").open_serial_connection = None
     util = _module("homeassistant.util")
     percentage = _module("homeassistant.util.percentage")
     percentage.ordered_list_item_to_percentage = lambda values, value: int(
@@ -155,18 +160,21 @@ def _install_homeassistant_shims() -> None:
 
 _install_homeassistant_shims()
 
+from homeassistant.const import Platform
+from homeassistant.exceptions import HomeAssistantError
+
+import custom_components.kocom_wallpad as integration_module
+from custom_components.kocom_wallpad import async_setup_entry
+from custom_components.kocom_wallpad import gateway as gateway_module
+from custom_components.kocom_wallpad.climate import KocomClimate
 from custom_components.kocom_wallpad.const import DeviceType, SubType
 from custom_components.kocom_wallpad.controller import KocomController, PacketFrame
-from custom_components.kocom_wallpad.gateway import KocomGateway, _CmdItem
-from custom_components.kocom_wallpad.models import DeviceKey, DeviceState
-from custom_components.kocom_wallpad import gateway as gateway_module
-from custom_components.kocom_wallpad.transport import AsyncConnection
-from custom_components.kocom_wallpad.climate import KocomClimate
-from custom_components.kocom_wallpad.switch import KocomSwitch
-from custom_components.kocom_wallpad.light import KocomLight
 from custom_components.kocom_wallpad.fan import KocomFan
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.const import Platform
+from custom_components.kocom_wallpad.gateway import KocomGateway, _CmdItem
+from custom_components.kocom_wallpad.light import KocomLight
+from custom_components.kocom_wallpad.models import DeviceKey, DeviceState
+from custom_components.kocom_wallpad.switch import KocomSwitch
+from custom_components.kocom_wallpad.transport import AsyncConnection
 
 
 class _Registry:
@@ -1013,6 +1021,127 @@ class EntityActionSafetyTests(unittest.IsolatedAsyncioTestCase):
                 await getattr(entity, method)(**kwargs)
 
             gateway.async_send_action.assert_not_awaited()
+
+
+class SetupCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    def test_manifest_and_transport_use_serial_asyncio_fast(self):
+        manifest = json.loads(
+            (Path(__file__).parents[1] / "custom_components/kocom_wallpad/manifest.json").read_text()
+        )
+        self.assertIn("pyserial-asyncio-fast", manifest["requirements"])
+        transport = (
+            Path(__file__).parents[1] / "custom_components/kocom_wallpad/transport.py"
+        ).read_text()
+        self.assertIn("import serial_asyncio_fast", transport)
+        self.assertNotIn("import serial_asyncio\n", transport)
+
+    async def test_parent_device_is_registered_before_platform_forwarding(self):
+        events = []
+
+        class FakeGateway:
+            def __init__(self, _hass, _entry, host, port):
+                self.host = host
+                self.port = port
+                events.append(("gateway", host, port))
+
+            async def async_get_entity_registry(self):
+                events.append("entity_registry")
+
+            async def async_start(self):
+                events.append("start")
+
+            async def async_stop(self, _event=None):
+                events.append("stop")
+
+        class FakeDeviceRegistry:
+            def async_get_or_create(self, **kwargs):
+                events.append(("parent", kwargs))
+                return object()
+
+        async def forward(_entry, _platforms):
+            events.append("forward")
+
+        entry = types.SimpleNamespace(
+            entry_id="entry-id",
+            data={"host": "wallpad.local", "port": 8899},
+            async_on_unload=lambda callback: events.append(("unload", callback)),
+        )
+        hass = types.SimpleNamespace(
+            data={},
+            bus=types.SimpleNamespace(async_listen_once=lambda *_args: lambda: None),
+            config_entries=types.SimpleNamespace(async_forward_entry_setups=forward),
+        )
+
+        with (
+            patch.object(integration_module, "KocomGateway", FakeGateway),
+            patch.object(integration_module.dr, "async_get", return_value=FakeDeviceRegistry()),
+        ):
+            self.assertTrue(await async_setup_entry(hass, entry))
+
+        parent_events = [event for event in events if isinstance(event, tuple) and event[0] == "parent"]
+        self.assertEqual(1, len(parent_events))
+        self.assertEqual(
+            {
+                "config_entry_id": "entry-id",
+                "identifiers": {("kocom_wallpad", "wallpad.local")},
+                "manufacturer": "KOCOM",
+                "model": "Kocom Wallpad",
+                "name": "Kocom Wallpad",
+            },
+            parent_events[0][1],
+        )
+        self.assertLess(events.index(parent_events[0]), events.index("forward"))
+        self.assertEqual("Kocom Wallpad", parent_events[0][1]["name"])
+        self.assertNotIn("wallpad.local", parent_events[0][1]["name"])
+
+    async def test_parent_registration_failure_precedes_gateway_setup(self):
+        events = []
+
+        class FakeGateway:
+            def __init__(self, *_args, **_kwargs):
+                events.append("gateway")
+
+            async def async_get_entity_registry(self):
+                events.append("entity_registry")
+
+            async def async_start(self):
+                events.append("start")
+
+            async def async_stop(self, _event=None):
+                events.append("stop")
+
+        class FailingDeviceRegistry:
+            def async_get_or_create(self, **_kwargs):
+                events.append("parent")
+                raise RuntimeError("registry failure")
+
+        async def forward(_entry, _platforms):
+            events.append("forward")
+
+        entry = types.SimpleNamespace(
+            entry_id="entry-id",
+            data={"host": "wallpad.local", "port": 8899},
+            async_on_unload=lambda callback: events.append(("unload", callback)),
+        )
+        hass = types.SimpleNamespace(
+            data={},
+            bus=types.SimpleNamespace(async_listen_once=lambda *_args: lambda: None),
+            config_entries=types.SimpleNamespace(async_forward_entry_setups=forward),
+        )
+
+        with (
+            patch.object(integration_module, "KocomGateway", FakeGateway),
+            patch.object(
+                integration_module.dr,
+                "async_get",
+                return_value=FailingDeviceRegistry(),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            await async_setup_entry(hass, entry)
+
+        self.assertEqual(["parent"], events)
+        self.assertEqual({}, hass.data)
 
 
 if __name__ == "__main__":

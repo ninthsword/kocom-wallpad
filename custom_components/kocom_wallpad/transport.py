@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
-import asyncio
-import serial_asyncio
-import time
+
+import serial_asyncio_fast
 
 from .const import LOGGER
 
@@ -36,7 +37,7 @@ class AsyncConnection:
         """
         try:
             if self.port is None:
-                self._reader, self._writer = await serial_asyncio.open_serial_connection(
+                self._reader, self._writer = await serial_asyncio_fast.open_serial_connection(
                     url=self.host, baudrate=self.serial_baud
                 )
                 LOGGER.info("Connection opened for serial: %s", self.host)

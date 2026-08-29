@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_HOST, CONF_PORT, EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN, PLATFORMS
 from .gateway import KocomGateway
@@ -14,6 +15,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Kocom Wallpad from a config entry."""
     host: str = entry.data[CONF_HOST]
     port: int = entry.data[CONF_PORT]
+
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, str(host))},
+        manufacturer="KOCOM",
+        model="Kocom Wallpad",
+        name="Kocom Wallpad",
+    )
 
     gateway = KocomGateway(hass, entry, host=host, port=port)
     await gateway.async_get_entity_registry()
