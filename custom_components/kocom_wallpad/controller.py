@@ -2,37 +2,38 @@
 
 from __future__ import annotations
 
-from typing import List, Callable, Any, Tuple
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Any
 
-from homeassistant.const import Platform, UnitOfTemperature
-from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
-from homeassistant.components.switch import SwitchDeviceClass
 from homeassistant.components.climate.const import (
-    PRESET_NONE,
-    PRESET_AWAY,
     FAN_LOW,
+    PRESET_AWAY,
+    PRESET_NONE,
     HVACMode,
 )
+from homeassistant.components.sensor import SensorDeviceClass
+from homeassistant.components.switch import SwitchDeviceClass
+from homeassistant.const import Platform, UnitOfTemperature
 
 from .const import (
+    CMD_CONFIRM_TIMEOUT,
     LOGGER,
+    PACKET_LEN,
     PACKET_PREFIX,
     PACKET_SUFFIX,
-    PACKET_LEN,
-    CMD_CONFIRM_TIMEOUT,
     DeviceType,
     SubType,
 )
 from .models import (
-    DEVICE_TYPE_MAP,
-    AIRCONDITIONER_HVAC_MAP,
     AIRCONDITIONER_FAN_MAP,
-    VENTILATION_PRESET_MAP,
+    AIRCONDITIONER_HVAC_MAP,
+    DEVICE_TYPE_MAP,
     ELEVATOR_DIRECTION_MAP,
+    VENTILATION_PRESET_MAP,
     DeviceKey,
-    DeviceState
+    DeviceState,
 )
 
 Predicate = Callable[[DeviceState], bool]
@@ -116,8 +117,8 @@ class KocomController:
             LOGGER.debug("Packet received: raw=%s", pkt.hex())
             self._dispatch_packet(pkt)
 
-    def _split_buf(self) -> List[bytes]:
-        packets: List[bytes] = []
+    def _split_buf(self) -> list[bytes]:
+        packets: list[bytes] = []
         buf = self._rx_buf
         while True:
             start = buf.find(PACKET_PREFIX)
@@ -195,8 +196,8 @@ class KocomController:
             dev = DeviceState(key=key, platform=Platform.LIGHT, attribute={}, state=state)
             return dev
 
-    def _handle_switch(self, frame: PacketFrame) -> List[DeviceState]:
-        states: List[DeviceState] = []
+    def _handle_switch(self, frame: PacketFrame) -> list[DeviceState]:
+        states: list[DeviceState] = []
         if frame.command == 0x00:
             for idx in range(8):
                 key = DeviceKey(
@@ -218,8 +219,8 @@ class KocomController:
                 states.append(dev)
             return states
 
-    def _handle_thermostat(self, frame: PacketFrame) -> List[DeviceState]:
-        states: List[DeviceState] = []
+    def _handle_thermostat(self, frame: PacketFrame) -> list[DeviceState]:
+        states: list[DeviceState] = []
         is_live_status = (
             frame.packet_type == 0x0B
             and frame.dest == b"\x01\x00"
@@ -348,8 +349,8 @@ class KocomController:
             dev = DeviceState(key=key, platform=Platform.CLIMATE, attribute=attribute, state=state)
             return dev
     
-    def _handle_ventilation(self, frame: PacketFrame) -> List[DeviceState]:
-        states: List[DeviceState] = []
+    def _handle_ventilation(self, frame: PacketFrame) -> list[DeviceState]:
+        states: list[DeviceState] = []
         if frame.command == 0x00:
             key = DeviceKey(
                 device_type=frame.dev_type,
@@ -427,8 +428,8 @@ class KocomController:
             dev = DeviceState(key=key, platform=Platform.SWITCH, attribute={}, state=state)
             return dev
 
-    def _handle_elevator(self, frame: PacketFrame) -> List[DeviceState]:    
-        states: List[DeviceState] = []
+    def _handle_elevator(self, frame: PacketFrame) -> list[DeviceState]:
+        states: list[DeviceState] = []
         key = DeviceKey(
             device_type=frame.dev_type,
             room_index=frame.dev_room,
@@ -471,7 +472,7 @@ class KocomController:
                 state = f"{chr(frame.payload[1])}{chr(frame.payload[2])}"
             else:
                 if frame.payload[1] >> 4 == 0x08:
-                    state = f"B{str(frame.payload[1] & 0x0F)}"
+                    state = f"B{frame.payload[1] & 0x0F!s}"
                 else:
                     state = str(frame.payload[1])
         if state != "" and state != "unknown":
@@ -496,8 +497,8 @@ class KocomController:
             dev = DeviceState(key=key, platform=Platform.BINARY_SENSOR, attribute=attribute, state=state)
             return dev
         
-    def _handle_airquality(self, frame: PacketFrame) -> List[DeviceState]:
-        states: List[DeviceState] = []
+    def _handle_airquality(self, frame: PacketFrame) -> list[DeviceState]:
+        states: list[DeviceState] = []
         if frame.command in (0x00, 0x3A):
             data_mapping = {
                 SubType.PM10: (SensorDeviceClass.PM10, "µg/m³", frame.payload[0]),
@@ -532,7 +533,7 @@ class KocomController:
             return cond(dev)
         return _inner
 
-    def _expect_for_switch_like(self, key: DeviceKey, action: str, **kwargs: Any) -> Tuple[Predicate, float]:
+    def _expect_for_switch_like(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
         def _on(dev: DeviceState) -> bool:  return bool(dev.state) is True
         def _off(dev: DeviceState) -> bool: return bool(dev.state) is False
 
@@ -542,7 +543,7 @@ class KocomController:
             return self._match_key_and(key, _off), CMD_CONFIRM_TIMEOUT
         return self._match_key_and(key, lambda _d: False), CMD_CONFIRM_TIMEOUT
 
-    def _expect_for_ventilation(self, key: DeviceKey, action: str, **kwargs: Any) -> Tuple[Predicate, float]:
+    def _expect_for_ventilation(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
         def is_on(d: DeviceState) -> bool:
             return isinstance(d.state, dict) and d.state.get("state") is True
         def is_off(d: DeviceState) -> bool:
@@ -562,16 +563,14 @@ class KocomController:
 
         return self._match_key_and(key, lambda _d: False), CMD_CONFIRM_TIMEOUT
 
-    def _expect_for_gasvalve(self, key: DeviceKey, action: str, **kwargs: Any) -> Tuple[Predicate, float]:
+    def _expect_for_gasvalve(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
         # 밸브는 동작이 느릴 수 있으니 기본 타임아웃 상향
         base_timeout = max(CMD_CONFIRM_TIMEOUT, 1.5)
-        if action == "turn_on":
-            return True, base_timeout
-        if action == "turn_off":
-            return self._match_key_and(key, lambda d: bool(d.state) is False), base_timeout
-        return self._match_key_and(key, lambda _d: False), base_timeout
+        if action != "turn_off":
+            raise ValueError(f"Unsupported gas valve action: {action}")
+        return self._match_key_and(key, lambda d: bool(d.state) is False), base_timeout
 
-    def _expect_for_thermostat(self, key: DeviceKey, action: str, **kwargs: Any) -> Tuple[Predicate, float]:
+    def _expect_for_thermostat(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
         if action == "set_hvac":
             hm = kwargs["hvac_mode"]
             return self._match_key_and(key, lambda d: isinstance(d.state, dict) and d.state.get("hvac_mode") == hm), CMD_CONFIRM_TIMEOUT
@@ -587,7 +586,7 @@ class KocomController:
             return self._match_key_and(key, lambda d: isinstance(d.state, dict) and d.state.get("state") is False), CMD_CONFIRM_TIMEOUT
         return self._match_key_and(key, lambda _d: False), CMD_CONFIRM_TIMEOUT
     
-    def _expect_for_airconditioner(self, key: DeviceKey, action: str, **kwargs: Any) -> Tuple[Predicate, float]:
+    def _expect_for_airconditioner(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
         if action == "set_hvac":
             hm = kwargs["hvac_mode"]
             return self._match_key_and(key, lambda d: isinstance(d.state, dict) and d.state.get("hvac_mode") == hm), CMD_CONFIRM_TIMEOUT
@@ -606,7 +605,7 @@ class KocomController:
             return self._match_key_and(key, lambda d: isinstance(d.state, dict) and d.state.get("state") is False), CMD_CONFIRM_TIMEOUT
         return self._match_key_and(key, lambda _d: False), CMD_CONFIRM_TIMEOUT
 
-    def build_expectation(self, key: DeviceKey, action: str, **kwargs: Any) -> Tuple[Predicate, float]:
+    def build_expectation(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
         dt = key.device_type
         if dt in (DeviceType.LIGHT, DeviceType.LIGHTCUTOFF, DeviceType.OUTLET, DeviceType.ELEVATOR):
             return self._expect_for_switch_like(key, action, **kwargs)
@@ -620,11 +619,9 @@ class KocomController:
             return self._expect_for_airconditioner(key, action, **kwargs)            
         return self._match_key_and(key, lambda _d: False), CMD_CONFIRM_TIMEOUT
 
-    def generate_command(self, key: DeviceKey, action: str, **kwargs) -> Tuple[bytes, Predicate, float]:
+    def generate_command(self, key: DeviceKey, action: str, **kwargs) -> tuple[bytes, Predicate, float]:
         device_type = key.device_type
         room_index = key.room_index
-        device_index = key.device_index
-        sub_type = key.sub_type
 
         if device_type not in REV_DT_MAP:
             raise ValueError(f"Invalid device type: {device_type}")
@@ -653,6 +650,8 @@ class KocomController:
         elif device_type == DeviceType.AIRCONDITIONER:
             data = self._generate_airconditioner(action, data, **kwargs)
         elif device_type == DeviceType.GASVALVE:
+            if action != "turn_off":
+                raise ValueError(f"Unsupported gas valve action: {action}")
             command = bytes([0x02])
         elif device_type == DeviceType.ELEVATOR:
             dest_dev = bytes([0x01])
@@ -715,7 +714,7 @@ class KocomController:
     def _encode_whole_temperature(value: Any) -> int:
         """Return a protocol-safe whole-degree temperature without truncation."""
         if isinstance(value, bool):
-            raise ValueError("Target temperature must be a whole degree")
+            raise TypeError("Target temperature must be a whole degree")
         try:
             temperature = float(value)
         except (TypeError, ValueError) as exc:

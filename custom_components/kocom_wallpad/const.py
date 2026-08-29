@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from enum import IntEnum
+
 from homeassistant.const import Platform
 
 LOGGER = logging.getLogger(__package__)

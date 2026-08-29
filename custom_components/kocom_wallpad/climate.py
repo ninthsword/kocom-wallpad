@@ -2,26 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any, List
-
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
     ClimateEntityFeature,
-    HVACMode,
     HVACAction,
+    HVACMode,
 )
-
-from homeassistant.const import Platform, UnitOfTemperature, ATTR_TEMPERATURE
-from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.const import ATTR_TEMPERATURE, Platform, UnitOfTemperature
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import DOMAIN
+from .entity_base import KocomBaseEntity
 from .gateway import KocomGateway
 from .models import DeviceState
-from .entity_base import KocomBaseEntity
-from .const import DOMAIN, LOGGER
 
 
 async def async_setup_entry(
@@ -38,7 +35,7 @@ async def async_setup_entry(
         if devices is None:
             devices = gateway.get_devices_from_platform(Platform.CLIMATE)
 
-        entities: List[KocomClimate] = []
+        entities: list[KocomClimate] = []
         for dev in devices:
             entity = KocomClimate(gateway, dev)
             entities.append(entity)
@@ -100,7 +97,7 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
         return self._device.state["hvac_mode"]
     
     @property
-    def hvac_modes(self) -> List[HVACMode]:
+    def hvac_modes(self) -> list[HVACMode]:
         return self._device.attribute["hvac_modes"]
     
     # ----------------------------------------------------------------
@@ -140,7 +137,7 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
         return self._device.state["fan_mode"]
     
     @property
-    def fan_modes(self) -> List[str]:
+    def fan_modes(self) -> list[str]:
         return self._device.attribute["fan_modes"]
 
     @property
@@ -150,7 +147,7 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
         return self._device.state["preset_mode"]
     
     @property
-    def preset_modes(self) -> List[str]:
+    def preset_modes(self) -> list[str]:
         return self._device.attribute["preset_modes"]
 
     @property
