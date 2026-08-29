@@ -4,21 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.restore_state import RestoreEntity, RestoredExtraData
-from homeassistant.core import callback
-from homeassistant.const import Platform
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.components.light import LightEntityDescription
-from homeassistant.components.switch import SwitchEntityDescription
+from homeassistant.components.binary_sensor import BinarySensorEntityDescription
 from homeassistant.components.climate import ClimateEntityDescription
 from homeassistant.components.fan import FanEntityDescription
+from homeassistant.components.light import LightEntityDescription
 from homeassistant.components.sensor import SensorEntityDescription
-from homeassistant.components.binary_sensor import BinarySensorEntityDescription
+from homeassistant.components.switch import SwitchEntityDescription
+from homeassistant.const import Platform
+from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.restore_state import RestoredExtraData, RestoreEntity
 
-from .const import DOMAIN, DeviceType, SubType
-
+from .const import DOMAIN, LOGGER, DeviceType, SubType
 
 ENTITY_DESCRIPTION_MAP = {
     Platform.LIGHT: LightEntityDescription,
@@ -66,20 +65,20 @@ class KocomBaseEntity(RestoreEntity):
     @property
     def format_translation_placeholders(self) -> str:
         if self._device.key.sub_type == SubType.NONE:
-            return f"{str(self._device.key.room_index)}-{str(self._device.key.device_index)}"
+            return f"{self._device.key.room_index!s}-{self._device.key.device_index!s}"
         else:
-            return f"{str(self._device.key.room_index)}-{str(self._device.key.device_index)}"
+            return f"{self._device.key.room_index!s}-{self._device.key.device_index!s}"
 
     @property
     def format_identifiers(self) -> str:
         if self._device.key.device_type in {
             DeviceType.VENTILATION, DeviceType.GASVALVE, DeviceType.ELEVATOR, DeviceType.MOTION
         }:
-            return f"KOCOM"
+            return "KOCOM"
         elif self._device.key.device_type in {
             DeviceType.LIGHT, DeviceType.LIGHTCUTOFF, DeviceType.DIMMINGLIGHT
         }:
-            return f"KOCOM LIGHT"
+            return "KOCOM LIGHT"
         else:
             return f"KOCOM {self._device.key.device_type.name}"
 
@@ -96,8 +95,8 @@ class KocomBaseEntity(RestoreEntity):
         for unsub in self._unsubs:
             try:
                 unsub()
-            except Exception:
-                pass
+            except (RuntimeError, ValueError) as err:
+                LOGGER.debug("Entity unsubscribe failed: %s", err)
         self._unsubs.clear()
 
     @callback
@@ -118,6 +117,6 @@ class KocomBaseEntity(RestoreEntity):
     @property
     def extra_restore_state_data(self) -> RestoredExtraData:
         return RestoredExtraData({
-            "packet": getattr(self._device, "_packet", bytes()).hex(),
+            "packet": getattr(self._device, "_packet", b"").hex(),
             "device_storage": self.gateway.controller._device_storage
         })

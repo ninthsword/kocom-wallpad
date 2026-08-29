@@ -2,24 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, List
+from typing import Any
 
 from homeassistant.components.fan import FanEntity, FanEntityFeature
-
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util.percentage import (
     ordered_list_item_to_percentage,
     percentage_to_ordered_list_item,
 )
 
+from .const import DOMAIN
+from .entity_base import KocomBaseEntity
 from .gateway import KocomGateway
 from .models import DeviceState
-from .entity_base import KocomBaseEntity
-from .const import DOMAIN, LOGGER
 
 
 async def async_setup_entry(
@@ -36,7 +35,7 @@ async def async_setup_entry(
         if devices is None:
             devices = gateway.get_devices_from_platform(Platform.FAN)
 
-        entities: List[KocomFan] = []
+        entities: list[KocomFan] = []
         for dev in devices:
             entity = KocomFan(gateway, dev)
             entities.append(entity)
@@ -84,7 +83,7 @@ class KocomFan(KocomBaseEntity, FanEntity):
         return self._device.state["preset_mode"]
     
     @property
-    def preset_modes(self) -> List[str]:
+    def preset_modes(self) -> list[str]:
         return self._device.attribute["preset_modes"]
 
     async def async_set_percentage(self, percentage: int) -> None:
@@ -99,9 +98,9 @@ class KocomFan(KocomBaseEntity, FanEntity):
 
     async def async_turn_on(
         self,
-        speed: Optional[str] = None,
-        percentage: Optional[int] = None,
-        preset_mode: Optional[str] = None,
+        speed: str | None = None,
+        percentage: int | None = None,
+        preset_mode: str | None = None,
         **kwargs: Any,
     ) -> None:
         await self._async_send_or_raise("turn on the fan", "turn_on")

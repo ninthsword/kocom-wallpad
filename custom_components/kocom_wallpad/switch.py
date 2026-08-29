@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
-from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass
-
+from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import DOMAIN
+from .entity_base import KocomBaseEntity
 from .gateway import KocomGateway
 from .models import DeviceState
-from .entity_base import KocomBaseEntity
-from .const import DOMAIN, LOGGER
 
 
 async def async_setup_entry(
@@ -32,7 +31,7 @@ async def async_setup_entry(
         if devices is None:
             devices = gateway.get_devices_from_platform(Platform.SWITCH)
 
-        entities: List[KocomSwitch] = []
+        entities: list[KocomSwitch] = []
         for dev in devices:
             entity = KocomSwitch(gateway, dev)
             entities.append(entity)

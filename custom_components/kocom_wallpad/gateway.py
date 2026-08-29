@@ -4,28 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Tuple, List, Callable
 
-from homeassistant.core import HomeAssistant, Event, callback
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers import entity_registry as er, restore_state
 from homeassistant.const import Platform
+from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import restore_state
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
-    LOGGER,
     DOMAIN,
-    RECV_POLL_SEC,
     IDLE_GAP_SEC,
-    SEND_RETRY_MAX,
+    LOGGER,
+    RECV_POLL_SEC,
     SEND_RETRY_GAP,
+    SEND_RETRY_MAX,
     DeviceType,
     SubType,
 )
+from .controller import KocomController
 from .models import DeviceKey, DeviceState
 from .transport import AsyncConnection
-from .controller import KocomController
 
 
 @dataclass(slots=True)
@@ -39,7 +40,7 @@ class _CmdItem:
 
 class _PendingWaiter:
 
-    __slots__ = ("key", "predicate", "future")
+    __slots__ = ("future", "key", "predicate")
 
     def __init__(
         self, 
@@ -57,9 +58,9 @@ class EntityRegistry:
 
     def __init__(self) -> None:
         """Initialize the registry."""
-        self._states: Dict[Tuple[int, int, int, int], DeviceState] = {}
-        self._shadow: Dict[Tuple[int, int, int, int], DeviceState] = {}
-        self.by_platform: Dict[Platform, Dict[str, DeviceState]] = {}
+        self._states: dict[tuple[int, int, int, int], DeviceState] = {}
+        self._shadow: dict[tuple[int, int, int, int], DeviceState] = {}
+        self.by_platform: dict[Platform, dict[str, DeviceState]] = {}
 
     def upsert(self, dev: DeviceState, allow_insert: bool = True) -> tuple[bool, bool]:
         k = dev.key.key
@@ -85,7 +86,7 @@ class EntityRegistry:
             self._states[k] = dev
         return False, changed
 
-    def get(self, key: DeviceKey, include_shadow: bool = False) -> Optional[DeviceState]:
+    def get(self, key: DeviceKey, include_shadow: bool = False) -> DeviceState | None:
         dev = self._states.get(key.key)
         if dev is None and include_shadow:
             return self._shadow.get(key.key)
@@ -101,7 +102,7 @@ class EntityRegistry:
         self.by_platform.setdefault(dev.platform, {})[dev.key.unique_id] = dev
         return True
 
-    def all_by_platform(self, platform: Platform) -> List[DeviceState]:
+    def all_by_platform(self, platform: Platform) -> list[DeviceState]:
         return list(self.by_platform.get(platform, {}).values())
 
 
@@ -133,7 +134,7 @@ class KocomGateway:
         self._last_tx_monotonic: float = 0.0
         self._restore_mode: bool = False
         self._force_register_uid: str | None = None
-        self._live_device_keys: set[Tuple[int, int, int, int]] = set()
+        self._live_device_keys: set[tuple[int, int, int, int]] = set()
         self._active_item: _CmdItem | None = None
         self._connection_available: bool = False
         self._connection_generation: int = 0
@@ -328,8 +329,6 @@ class KocomGateway:
                 ):
                     return
                 await self._async_send_status_query(key, connection_generation)
-        except asyncio.CancelledError:
-            raise
         finally:
             if self._task_bootstrap_queries is asyncio.current_task():
                 self._task_bootstrap_queries = None
@@ -433,7 +432,7 @@ class KocomGateway:
             try:
                 if p.key.key == dev.key.key and p.predicate(dev):
                     hit.append(p)
-            except Exception:
+            except (AttributeError, KeyError, TypeError, ValueError):
                 # predicate 내부 오류 방어
                 continue
         if hit:
@@ -509,8 +508,8 @@ class KocomGateway:
                         packet, expect_predicate, timeout = self.controller.generate_command(
                             item.key, item.action, **item.kwargs
                         )
-                    except Exception as e:
-                        LOGGER.exception("generate_command failed: %s", e)
+                    except (KeyError, RuntimeError, TypeError, ValueError):
+                        LOGGER.exception("generate_command failed")
                         if not item.future.done():
                             item.future.set_result(False)
                         continue
@@ -530,8 +529,8 @@ class KocomGateway:
                                     await self.conn.send(packet)
                                     self._last_tx_monotonic = asyncio.get_running_loop().time()
                                     success = True
-                            except Exception as e:
-                                LOGGER.warning("Status query send failed: %s", e)
+                            except (OSError, RuntimeError, TimeoutError) as err:
+                                LOGGER.warning("Status query send failed: %s", err)
                         if not item.future.done():
                             item.future.set_result(success)
                         continue
@@ -559,10 +558,10 @@ class KocomGateway:
 
                         try:
                             await self.conn.send(packet)
-                        except Exception as e:
+                        except (OSError, RuntimeError, TimeoutError) as err:
                             if waiter in self._pendings:
                                 self._pendings.remove(waiter)
-                            LOGGER.warning("Send failed on attempt %d: %s", attempt, e)
+                            LOGGER.warning("Send failed on attempt %d: %s", attempt, err)
                             if attempt < SEND_RETRY_MAX:
                                 await asyncio.sleep(SEND_RETRY_GAP)
                                 continue

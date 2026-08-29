@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 import serial_asyncio_fast
 
@@ -16,15 +15,15 @@ from .const import LOGGER
 class AsyncConnection:
     """Async Connection."""
     host: str
-    port: Optional[int]
+    port: int | None
     serial_baud: int = 9600
     connect_timeout: float = 5.0
-    reconnect_backoff: Tuple[float, float] = (1.0, 30.0)  # min, max seconds
+    reconnect_backoff: tuple[float, float] = (1.0, 30.0)  # min, max seconds
 
     def __post_init__(self) -> None:
         """Initialize the connection."""
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
         self._last_activity_mono: float = time.monotonic()
         self._last_reconn_delay: float = 0.0
         self._connected = False
@@ -50,7 +49,7 @@ class AsyncConnection:
             self._connected = True
             self._touch()
             return True
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             LOGGER.warning("Connection open failed: %r", e)
             self._connected = False
             self._reader = None
@@ -63,8 +62,8 @@ class AsyncConnection:
             self._writer.close()
             try:
                 await self._writer.wait_closed()
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as err:
+                LOGGER.debug("Connection close failed: %r", err)
             finally:
                 self._writer = None
         self._reader = None
@@ -88,7 +87,7 @@ class AsyncConnection:
             await self._writer.drain()
             self._touch()
             return len(data)
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             LOGGER.warning("Send failed: %r", e)
             await self.close()
             raise
@@ -100,7 +99,7 @@ class AsyncConnection:
             chunk = await asyncio.wait_for(self._reader.read(nbytes), timeout=timeout)
         except asyncio.TimeoutError:
             return b""
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             LOGGER.warning("Recv failed: %r", e)
             await self.close()
             return b""

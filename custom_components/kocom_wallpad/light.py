@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any, ClassVar
 
-from homeassistant.components.light import LightEntity, ColorMode
-
+from homeassistant.components.light import ColorMode, LightEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import DOMAIN
+from .entity_base import KocomBaseEntity
 from .gateway import KocomGateway
 from .models import DeviceState
-from .entity_base import KocomBaseEntity
-from .const import DOMAIN, LOGGER
 
 
 async def async_setup_entry(
@@ -32,7 +31,7 @@ async def async_setup_entry(
         if devices is None:
             devices = gateway.get_devices_from_platform(Platform.LIGHT)
 
-        entities: List[KocomLight] = []
+        entities: list[KocomLight] = []
         for dev in devices:
             entity = KocomLight(gateway, dev)
             entities.append(entity)
@@ -50,7 +49,7 @@ async def async_setup_entry(
 class KocomLight(KocomBaseEntity, LightEntity):
     """Representation of a Kocom light."""
 
-    _attr_supported_color_modes = {ColorMode.ONOFF}
+    _attr_supported_color_modes: ClassVar[set[ColorMode]] = {ColorMode.ONOFF}
     _attr_color_mode = ColorMode.ONOFF
 
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
