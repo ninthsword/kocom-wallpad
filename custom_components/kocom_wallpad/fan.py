@@ -91,11 +91,11 @@ class KocomFan(KocomBaseEntity, FanEntity):
         args = {"speed": 0}
         if percentage > 0:
             args["speed"] = percentage_to_ordered_list_item(self._device.attribute["speed_list"], percentage)
-        await self.gateway.async_send_action(self._device.key, "set_percentage", **args)
+        await self._async_send_or_raise("set fan speed", "set_percentage", **args)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         args = {"preset_mode": preset_mode}
-        await self.gateway.async_send_action(self._device.key, "set_preset", **args)
+        await self._async_send_or_raise("set fan preset", "set_preset", **args)
 
     async def async_turn_on(
         self,
@@ -104,8 +104,7 @@ class KocomFan(KocomBaseEntity, FanEntity):
         preset_mode: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
-        await self.gateway.async_send_action(self._device.key, "turn_on")
+        await self._async_send_or_raise("turn on the fan", "turn_on")
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.gateway.async_send_action(self._device.key, "turn_off")
-        
+        await self._async_send_or_raise("turn off the fan", "turn_off")

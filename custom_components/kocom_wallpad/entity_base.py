@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.restore_state import RestoreEntity, RestoredExtraData
 from homeassistant.core import callback
@@ -104,6 +107,13 @@ class KocomBaseEntity(RestoreEntity):
     @property
     def available(self) -> bool:
         return self.gateway.is_device_available(self._device.key)
+
+    async def _async_send_or_raise(self, description: str, action: str, **args: Any) -> None:
+        """Send an action and surface transport/confirmation failures to HA."""
+        if not self.available:
+            raise HomeAssistantError("Kocom wallpad is unavailable")
+        if not await self.gateway.async_send_action(self._device.key, action, **args):
+            raise HomeAssistantError(f"Kocom wallpad could not {description}")
 
     @property
     def extra_restore_state_data(self) -> RestoredExtraData:

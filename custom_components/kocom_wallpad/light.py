@@ -62,7 +62,7 @@ class KocomLight(KocomBaseEntity, LightEntity):
         return self._device.state
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.gateway.async_send_action(self._device.key, "turn_on")
+        await self._async_send_or_raise("turn on the light", "turn_on")
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.gateway.async_send_action(self._device.key, "turn_off")
+        await self._async_send_or_raise("turn off the light", "turn_off")

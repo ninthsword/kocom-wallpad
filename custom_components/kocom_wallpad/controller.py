@@ -565,11 +565,9 @@ class KocomController:
     def _expect_for_gasvalve(self, key: DeviceKey, action: str, **kwargs: Any) -> Tuple[Predicate, float]:
         # 밸브는 동작이 느릴 수 있으니 기본 타임아웃 상향
         base_timeout = max(CMD_CONFIRM_TIMEOUT, 1.5)
-        if action == "turn_on":
-            return True, base_timeout
-        if action == "turn_off":
-            return self._match_key_and(key, lambda d: bool(d.state) is False), base_timeout
-        return self._match_key_and(key, lambda _d: False), base_timeout
+        if action != "turn_off":
+            raise ValueError(f"Unsupported gas valve action: {action}")
+        return self._match_key_and(key, lambda d: bool(d.state) is False), base_timeout
 
     def _expect_for_thermostat(self, key: DeviceKey, action: str, **kwargs: Any) -> Tuple[Predicate, float]:
         if action == "set_hvac":
@@ -653,6 +651,8 @@ class KocomController:
         elif device_type == DeviceType.AIRCONDITIONER:
             data = self._generate_airconditioner(action, data, **kwargs)
         elif device_type == DeviceType.GASVALVE:
+            if action != "turn_off":
+                raise ValueError(f"Unsupported gas valve action: {action}")
             command = bytes([0x02])
         elif device_type == DeviceType.ELEVATOR:
             dest_dev = bytes([0x01])

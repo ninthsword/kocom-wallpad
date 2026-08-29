@@ -7,7 +7,7 @@ these tests use only the narrow module shims needed by the protocol gateway.
 from __future__ import annotations
 
 import asyncio
-from enum import Enum
+from enum import Enum, IntFlag
 import sys
 import types
 import unittest
@@ -76,6 +76,8 @@ def _install_homeassistant_shims() -> None:
     components.climate = climate
     light = _module("homeassistant.components.light")
     light.LightEntityDescription = _EntityDescription
+    light.LightEntity = object
+    light.ColorMode = types.SimpleNamespace(ONOFF="onoff")
     components.light = light
     for package, attr, value in (
         ("sensor", "SensorDeviceClass", types.SimpleNamespace(TEMPERATURE="temperature")),
@@ -84,11 +86,22 @@ def _install_homeassistant_shims() -> None:
     ):
         module = _module(f"homeassistant.components.{package}")
         setattr(module, attr, value)
+        if package == "switch":
+            module.SwitchEntity = object
         setattr(module, f"{package.title().replace('_', '')}EntityDescription", _EntityDescription)
         setattr(components, package, module)
 
     fan = _module("homeassistant.components.fan")
     fan.FanEntityDescription = _EntityDescription
+    fan.FanEntity = object
+
+    class FanEntityFeature(IntFlag):
+        SET_SPEED = 1
+        TURN_OFF = 2
+        TURN_ON = 4
+        PRESET_MODE = 8
+
+    fan.FanEntityFeature = FanEntityFeature
     components.fan = fan
 
     helpers = _module("homeassistant.helpers")
@@ -129,6 +142,15 @@ def _install_homeassistant_shims() -> None:
     helpers.restore_state = restore_state
     helpers.dispatcher = dispatcher
     _module("serial_asyncio").open_serial_connection = None
+    util = _module("homeassistant.util")
+    percentage = _module("homeassistant.util.percentage")
+    percentage.ordered_list_item_to_percentage = lambda values, value: int(
+        values.index(value) * 100 / max(len(values) - 1, 1)
+    )
+    percentage.percentage_to_ordered_list_item = lambda values, value: values[
+        round((len(values) - 1) * value / 100)
+    ]
+    util.percentage = percentage
 
 
 _install_homeassistant_shims()
@@ -140,6 +162,9 @@ from custom_components.kocom_wallpad.models import DeviceKey, DeviceState
 from custom_components.kocom_wallpad import gateway as gateway_module
 from custom_components.kocom_wallpad.transport import AsyncConnection
 from custom_components.kocom_wallpad.climate import KocomClimate
+from custom_components.kocom_wallpad.switch import KocomSwitch
+from custom_components.kocom_wallpad.light import KocomLight
+from custom_components.kocom_wallpad.fan import KocomFan
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.const import Platform
 
@@ -263,6 +288,27 @@ class ControllerSafetyTests(unittest.TestCase):
                 DeviceKey(DeviceType.THERMOSTAT, 0xFF, 0, SubType.NONE),
                 "status_query",
             )
+
+    def test_gasvalve_lock_action_uses_command_and_callable_expectation(self):
+        controller = KocomController(_ControllerGateway())
+        key = DeviceKey(DeviceType.GASVALVE, 1, 0, SubType.NONE)
+        off_state = DeviceState(key, Platform.SWITCH, {}, False)
+        on_state = DeviceState(key, Platform.SWITCH, {}, True)
+
+        packet, expect, _ = controller.generate_command(key, "turn_off")
+
+        self.assertEqual(0x02, packet[9])
+        self.assertTrue(callable(expect))
+        self.assertTrue(expect(off_state))
+        self.assertFalse(expect(on_state))
+
+    def test_gasvalve_unsupported_action_is_rejected(self):
+        controller = KocomController(_ControllerGateway())
+        key = DeviceKey(DeviceType.GASVALVE, 1, 0, SubType.NONE)
+
+        for action in ("turn_on", "set_temperature", "status_query"):
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                controller.generate_command(key, action)
 
     def test_only_directed_thermostat_status_reports_are_parsed(self):
         controller = KocomController(_ControllerGateway())
@@ -900,6 +946,73 @@ class ClimateBootstrapSafetyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HomeAssistantError):
             await climate.async_set_temperature(temperature=22)
         gateway.async_send_action.assert_not_awaited()
+
+
+class EntityActionSafetyTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _device(device_type, platform):
+        key = DeviceKey(device_type, 1, 0, SubType.NONE)
+        if platform == Platform.FAN:
+            attribute = {
+                "feature_preset": True,
+                "speed_list": [1, 2],
+                "preset_modes": ["sleep"],
+            }
+            state = {"state": False, "speed": 0, "preset_mode": ""}
+        else:
+            attribute = {}
+            state = False
+        return DeviceState(key, platform, attribute, state)
+
+    @staticmethod
+    def _gateway(result, available=True):
+        return types.SimpleNamespace(
+            host="test",
+            controller=types.SimpleNamespace(_device_storage={}),
+            is_device_available=lambda _key: available,
+            async_send_action=AsyncMock(return_value=result),
+        )
+
+    def _cases(self):
+        return (
+            (KocomSwitch, DeviceType.OUTLET, Platform.SWITCH, "async_turn_on", {}),
+            (KocomSwitch, DeviceType.OUTLET, Platform.SWITCH, "async_turn_off", {}),
+            (KocomLight, DeviceType.LIGHT, Platform.LIGHT, "async_turn_on", {}),
+            (KocomLight, DeviceType.LIGHT, Platform.LIGHT, "async_turn_off", {}),
+            (KocomFan, DeviceType.VENTILATION, Platform.FAN, "async_turn_on", {}),
+            (KocomFan, DeviceType.VENTILATION, Platform.FAN, "async_turn_off", {}),
+            (KocomFan, DeviceType.VENTILATION, Platform.FAN, "async_set_percentage", {"percentage": 100}),
+            (KocomFan, DeviceType.VENTILATION, Platform.FAN, "async_set_preset_mode", {"preset_mode": "sleep"}),
+        )
+
+    async def test_switch_light_and_fan_actions_propagate_success(self):
+        for entity_class, device_type, platform, method, kwargs in self._cases():
+            gateway = self._gateway(True)
+            entity = entity_class(gateway, self._device(device_type, platform))
+
+            await getattr(entity, method)(**kwargs)
+
+            gateway.async_send_action.assert_awaited_once()
+
+    async def test_switch_light_and_fan_actions_raise_on_failed_send(self):
+        for entity_class, device_type, platform, method, kwargs in self._cases():
+            gateway = self._gateway(False)
+            entity = entity_class(gateway, self._device(device_type, platform))
+
+            with self.assertRaises(HomeAssistantError):
+                await getattr(entity, method)(**kwargs)
+
+            gateway.async_send_action.assert_awaited_once()
+
+    async def test_all_actions_raise_without_gateway_call_when_unavailable(self):
+        for entity_class, device_type, platform, method, kwargs in self._cases():
+            gateway = self._gateway(True, available=False)
+            entity = entity_class(gateway, self._device(device_type, platform))
+
+            with self.assertRaises(HomeAssistantError):
+                await getattr(entity, method)(**kwargs)
+
+            gateway.async_send_action.assert_not_awaited()
 
 
 if __name__ == "__main__":
