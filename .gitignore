@@ -172,3 +172,7 @@ cython_debug/
 .Trashes
 .VolumeIcon.icns
 .fseventsd
+
+/CLAUDE.md
+/AGENTS.md
+/.claude/
