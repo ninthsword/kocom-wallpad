@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any
 
-from homeassistant.components.light import ColorMode, LightEntity
+from homeassistant.components.light import LightEntity
+from homeassistant.components.light.const import ColorMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
@@ -21,7 +22,7 @@ async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry, 
     async_add_entities: AddEntitiesCallback
-) -> bool:
+) -> None:
     """Set up Kocom light platform."""
     gateway: KocomGateway = hass.data[DOMAIN][entry.entry_id]
 
@@ -46,10 +47,12 @@ async def async_setup_entry(
     async_add_light()
 
 
-class KocomLight(KocomBaseEntity, LightEntity):
+# Preserve the HA MRO mixing cached descriptors and dynamic properties.
+class KocomLight(KocomBaseEntity, LightEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
     """Representation of a Kocom light."""
 
-    _attr_supported_color_modes: ClassVar[set[ColorMode]] = {ColorMode.ONOFF}
+    # HA types this instance attribute; preserve the existing shared, unmodified default.
+    _attr_supported_color_modes: set[ColorMode] | None = {ColorMode.ONOFF}  # noqa: RUF012
     _attr_color_mode = ColorMode.ONOFF
 
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
@@ -57,7 +60,8 @@ class KocomLight(KocomBaseEntity, LightEntity):
         super().__init__(gateway, device)
 
     @property
-    def is_on(self) -> bool:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def is_on(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.state
 
     async def async_turn_on(self, **kwargs: Any) -> None:

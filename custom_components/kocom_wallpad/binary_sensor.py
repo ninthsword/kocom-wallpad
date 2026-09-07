@@ -49,7 +49,8 @@ async def async_setup_entry(
     async_add_binary_sensor()
     
 
-class KocomBinarySensor(KocomBaseEntity, BinarySensorEntity):
+# Preserve the HA MRO mixing cached descriptors and dynamic properties.
+class KocomBinarySensor(KocomBaseEntity, BinarySensorEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
     """Representation of a Kocom binary sensor."""
 
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
@@ -57,14 +58,17 @@ class KocomBinarySensor(KocomBaseEntity, BinarySensorEntity):
         super().__init__(gateway, device)
 
     @property
-    def is_on(self) -> bool:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def is_on(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.state
     
     @property
-    def device_class(self) -> BinarySensorDeviceClass | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def device_class(self) -> BinarySensorDeviceClass | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute.get("device_class", None)
     
     @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def extra_state_attributes(self) -> dict[str, Any] | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute.get("extra_state", None)
     

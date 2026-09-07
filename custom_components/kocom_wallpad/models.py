@@ -76,8 +76,15 @@ class DeviceKey:
         return (self.device_type.value, self.room_index, self.device_index, self.sub_type.value)
 
 
+class _DeviceStateMetadata:
+    """Annotations for metadata attached later; never dataclass fields or defaults."""
+
+    _packet: bytes
+    _is_register: bool
+
+
 @dataclass
-class DeviceState:
+class DeviceState(_DeviceStateMetadata):
     """Device state."""
     key: DeviceKey
     platform: Platform

@@ -1,0 +1,45 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: devtools/pyright/package-lock.json
+      - name: Install locked development tools
+        run: |
+          python -m pip install uv==0.12.5
+          uv venv --python 3.14.7 .venv
+          uv pip sync --python .venv/bin/python --require-hashes requirements-dev.lock
+          npm ci --prefix devtools/pyright --ignore-scripts --no-audit --no-fund
+      - name: Type check all maintained Python
+        run: devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --outputjson
+      - name: Lint
+        run: .venv/bin/ruff check --no-cache custom_components tests
+      - name: Lightweight offline tests
+        run: .venv/bin/python -B -m unittest discover -s tests -v
+      - name: Check runtime Python 3.11 syntax
+        run: |
+          .venv/bin/python -B - <<'PYTHON'
+          import ast
+          from pathlib import Path
+          for path in Path('custom_components/kocom_wallpad').rglob('*.py'):
+              ast.parse(path.read_text(encoding='utf-8'), filename=str(path), feature_version=(3, 11))
+          PYTHON

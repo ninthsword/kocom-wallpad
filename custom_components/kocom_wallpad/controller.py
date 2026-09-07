@@ -184,7 +184,7 @@ class KocomController:
             dev_state._packet = packet
             self.gateway.on_device_state(dev_state)
             
-    def _handle_cutoff_switch(self, frame: PacketFrame) -> DeviceState:
+    def _handle_cutoff_switch(self, frame: PacketFrame) -> DeviceState | None:
         if frame.command in (0x65, 0x66):
             key = DeviceKey(
                 device_type=frame.dev_type,
@@ -196,7 +196,7 @@ class KocomController:
             dev = DeviceState(key=key, platform=Platform.LIGHT, attribute={}, state=state)
             return dev
 
-    def _handle_switch(self, frame: PacketFrame) -> list[DeviceState]:
+    def _handle_switch(self, frame: PacketFrame) -> list[DeviceState] | None:
         states: list[DeviceState] = []
         if frame.command == 0x00:
             for idx in range(8):
@@ -219,7 +219,7 @@ class KocomController:
                 states.append(dev)
             return states
 
-    def _handle_thermostat(self, frame: PacketFrame) -> list[DeviceState]:
+    def _handle_thermostat(self, frame: PacketFrame) -> list[DeviceState] | None:
         states: list[DeviceState] = []
         is_live_status = (
             frame.packet_type == 0x0B
@@ -318,7 +318,7 @@ class KocomController:
             states.append(dev)
             return states
         
-    def _handle_airconditioner(self, frame: PacketFrame) -> DeviceState:
+    def _handle_airconditioner(self, frame: PacketFrame) -> DeviceState | None:
         if frame.command == 0x00:
             key = DeviceKey(
                 device_type=frame.dev_type,
@@ -349,7 +349,7 @@ class KocomController:
             dev = DeviceState(key=key, platform=Platform.CLIMATE, attribute=attribute, state=state)
             return dev
     
-    def _handle_ventilation(self, frame: PacketFrame) -> list[DeviceState]:
+    def _handle_ventilation(self, frame: PacketFrame) -> list[DeviceState] | None:
         states: list[DeviceState] = []
         if frame.command == 0x00:
             key = DeviceKey(
@@ -416,7 +416,7 @@ class KocomController:
             states.append(dev)
             return states
 
-    def _handle_gasvalve(self, frame: PacketFrame) -> DeviceState:
+    def _handle_gasvalve(self, frame: PacketFrame) -> DeviceState | None:
         if frame.command in (0x01, 0x02):
             key = DeviceKey(
                 device_type=frame.dev_type,
@@ -482,7 +482,7 @@ class KocomController:
             states.append(dev)
         return states
     
-    def _handle_motion(self, frame: PacketFrame) -> DeviceState:
+    def _handle_motion(self, frame: PacketFrame) -> DeviceState | None:
         if frame.command in (0x00, 0x04):
             key = DeviceKey(
                 device_type=frame.dev_type,
@@ -497,7 +497,7 @@ class KocomController:
             dev = DeviceState(key=key, platform=Platform.BINARY_SENSOR, attribute=attribute, state=state)
             return dev
         
-    def _handle_airquality(self, frame: PacketFrame) -> list[DeviceState]:
+    def _handle_airquality(self, frame: PacketFrame) -> list[DeviceState] | None:
         states: list[DeviceState] = []
         if frame.command in (0x00, 0x3A):
             data_mapping = {
@@ -669,7 +669,7 @@ class KocomController:
         expect, timeout = self.build_expectation(key, action, **kwargs)
         return packet, expect, timeout
 
-    def _generate_switch(self, key: DeviceKey, action: str, data: bytes) -> bytes:
+    def _generate_switch(self, key: DeviceKey, action: str, data: bytearray) -> bytearray:
         for idx in range(8):
             new_key = replace(key, device_index=idx)
             st = self.gateway.registry.get(new_key)
@@ -680,7 +680,7 @@ class KocomController:
                 data[idx] = 0xFF if action == "turn_on" else 0x00
         return data
 
-    def _generate_ventilation(self, action: str, data: bytes, **kwargs: Any) -> bytes:
+    def _generate_ventilation(self, action: str, data: bytearray, **kwargs: Any) -> bytearray:
         if action == "set_preset":
             pm = kwargs["preset_mode"]
             data[0] = 0x11
@@ -693,7 +693,7 @@ class KocomController:
             data[0] = 0x11 if action == "turn_on" else 0x00
         return data
 
-    def _generate_thermostat(self, action: str, data: bytes, **kwargs: Any) -> bytes:
+    def _generate_thermostat(self, action: str, data: bytearray, **kwargs: Any) -> bytearray:
         if action == "set_hvac":
             hm = kwargs["hvac_mode"]
             data[0] = 0x11 if hm == HVACMode.HEAT else 0x00
@@ -726,7 +726,7 @@ class KocomController:
             raise ValueError("Target temperature is outside the protocol range")
         return encoded
     
-    def _generate_airconditioner(self, action: str, data: bytes, **kwargs: Any) -> bytes:
+    def _generate_airconditioner(self, action: str, data: bytearray, **kwargs: Any) -> bytearray:
         if action == "set_hvac":
             hm = kwargs["hvac_mode"]
             if hm == HVACMode.OFF:

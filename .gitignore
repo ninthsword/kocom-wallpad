@@ -176,3 +176,9 @@ cython_debug/
 /CLAUDE.md
 /AGENTS.md
 /.claude/
+
+# Generated development environments and caches
+/.venv/
+/devtools/pyright/node_modules/
+**/__pycache__/
+/.ruff_cache/
