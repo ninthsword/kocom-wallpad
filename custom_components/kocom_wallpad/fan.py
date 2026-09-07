@@ -50,7 +50,8 @@ async def async_setup_entry(
     async_add_fan()
 
 
-class KocomFan(KocomBaseEntity, FanEntity):
+# Preserve the HA MRO mixing cached descriptors and dynamic properties.
+class KocomFan(KocomBaseEntity, FanEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
     """Representation of a Kocom fan."""
 
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
@@ -69,21 +70,25 @@ class KocomFan(KocomBaseEntity, FanEntity):
         return self._device.state["state"]
     
     @property
-    def speed_count(self) -> int:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def speed_count(self) -> int:  # pyright: ignore[reportIncompatibleVariableOverride]
         return len(self._device.attribute["speed_list"])
 
     @property
-    def percentage(self) -> int:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def percentage(self) -> int:  # pyright: ignore[reportIncompatibleVariableOverride]
         if not self._device.state["state"] or self._device.state["speed"] == 0:
             return 0
         return ordered_list_item_to_percentage(self._device.attribute["speed_list"], self._device.state["speed"])
     
     @property
-    def preset_mode(self) -> str:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def preset_mode(self) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.state["preset_mode"]
     
     @property
-    def preset_modes(self) -> list[str]:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def preset_modes(self) -> list[str]:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute["preset_modes"]
 
     async def async_set_percentage(self, percentage: int) -> None:
@@ -98,9 +103,10 @@ class KocomFan(KocomBaseEntity, FanEntity):
 
     async def async_turn_on(
         self,
-        speed: str | None = None,
         percentage: int | None = None,
         preset_mode: str | None = None,
+        *,
+        speed: str | None = None,
         **kwargs: Any,
     ) -> None:
         await self._async_send_or_raise("turn on the fan", "turn_on")

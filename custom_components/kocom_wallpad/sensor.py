@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -49,7 +47,8 @@ async def async_setup_entry(
     async_add_sensor()
 
 
-class KocomSensor(KocomBaseEntity, SensorEntity):
+# Preserve the HA MRO mixing cached descriptors and dynamic properties.
+class KocomSensor(KocomBaseEntity, SensorEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
     """Representation of a Kocom sensor."""
     
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
@@ -57,13 +56,16 @@ class KocomSensor(KocomBaseEntity, SensorEntity):
         super().__init__(gateway, device)
 
     @property
-    def native_value(self) -> Any:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def native_value(self) -> str | int | float:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.state
     
     @property
-    def device_class(self) -> SensorDeviceClass | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def device_class(self) -> SensorDeviceClass | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute.get("device_class", None)
     
     @property
-    def native_unit_of_measurement(self) -> str | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def native_unit_of_measurement(self) -> str | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute.get("unit_of_measurement", None)

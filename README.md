@@ -62,3 +62,31 @@ logger:
 
 ## 라이선스
 Kocom WallPad 통합은 [Apache License](./LICENSE)를 따릅니다.
+
+## Development checks
+
+Use Python 3.14.7, uv 0.12.5 and Node.js 24. The hash-locked development dependencies
+include Home Assistant 2026.8.0, pyserial-asyncio-fast 0.16 and Ruff 0.16.4.
+Pyright 1.1.413 is isolated under `devtools/pyright`. Runtime dependencies and
+Python 3.11 syntax compatibility remain unchanged.
+
+```sh
+python3 -m pip install uv==0.12.5
+uv venv --python 3.14.7 .venv
+uv pip sync --python .venv/bin/python --require-hashes requirements-dev.lock
+npm ci --prefix devtools/pyright --ignore-scripts --no-audit --no-fund
+devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --outputjson
+.venv/bin/ruff check --no-cache custom_components tests
+.venv/bin/python -B -m unittest discover -s tests -v
+```
+
+Pyright checks all 14 integration modules and the offline regression module against
+real development dependencies. The tests use narrow Home Assistant shims and fake
+transports to verify packet bytes, confirmation, reconnect and shutdown behavior
+without network access or devices. They also protect the `DeviceState` constructor,
+dataclass fields, serialization and initially absent dynamic metadata.
+
+Keep `requirements-dev.in` and its hash-checked `requirements-dev.lock` together when
+intentionally updating dependencies. CI runs these checks and parses runtime source
+with Python 3.11 syntax rules. These checks do not install the integration into
+Home Assistant or operate services or devices.

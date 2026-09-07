@@ -73,12 +73,14 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
             self._attr_supported_features |= ClimateEntityFeature.PRESET_MODE
 
     @property
-    def available(self) -> bool:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def available(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Return whether a confirmation-bound climate command can be sent."""
         return self.gateway.is_transport_available()
 
     @property
-    def extra_state_attributes(self) -> dict[str, bool]:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def extra_state_attributes(self) -> dict[str, bool]:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Expose whether state was physically confirmed in this connection."""
         return {
             "physical_state_confirmed": self.gateway.is_device_state_confirmed(
@@ -91,20 +93,23 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
         return self.gateway.is_device_state_confirmed(self._device.key)
 
     @property
-    def hvac_mode(self) -> HVACMode | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def hvac_mode(self) -> HVACMode | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         if not self._state_is_confirmed:
             return None
         return self._device.state["hvac_mode"]
     
     @property
-    def hvac_modes(self) -> list[HVACMode]:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def hvac_modes(self) -> list[HVACMode]:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute["hvac_modes"]
     
     # ----------------------------------------------------------------
     # [추가됨] 난방 중/유휴 상태 표시를 위한 hvac_action 속성 추가
     # ----------------------------------------------------------------
     @property
-    def hvac_action(self) -> HVACAction | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def hvac_action(self) -> HVACAction | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Return the current running hvac operation."""
         if not self._state_is_confirmed:
             return None
@@ -131,39 +136,46 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
     # ----------------------------------------------------------------
     
     @property
-    def fan_mode(self) -> str | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def fan_mode(self) -> str | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         if not self._state_is_confirmed:
             return None
         return self._device.state["fan_mode"]
     
     @property
-    def fan_modes(self) -> list[str]:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def fan_modes(self) -> list[str]:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute["fan_modes"]
 
     @property
-    def preset_mode(self) -> str | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def preset_mode(self) -> str | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         if not self._state_is_confirmed:
             return None
         return self._device.state["preset_mode"]
     
     @property
-    def preset_modes(self) -> list[str]:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def preset_modes(self) -> list[str]:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute["preset_modes"]
 
     @property
-    def current_temperature(self) -> float | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def current_temperature(self) -> float | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         if not self._state_is_confirmed:
             return None
         return self._device.state["current_temp"]
 
     @property
-    def target_temperature(self) -> float | None:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def target_temperature(self) -> float | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         if not self._state_is_confirmed:
             return None
         return self._device.state["target_temp"]
     
     @property
-    def target_temperature_step(self) -> float:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def target_temperature_step(self) -> float:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute["temp_step"]
     
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:

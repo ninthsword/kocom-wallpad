@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Literal
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -35,7 +36,7 @@ class _CmdItem:
     action: str
     kwargs: dict
     connection_generation: int | None = None
-    future: asyncio.Future = field(default_factory=lambda: asyncio.get_running_loop().create_future())
+    future: asyncio.Future[bool] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
 
 
 class _PendingWaiter:
@@ -50,7 +51,7 @@ class _PendingWaiter:
     ) -> None:
         self.key = key
         self.predicate = predicate
-        self.future: asyncio.Future[DeviceState] = loop.create_future()
+        self.future: asyncio.Future[DeviceState | Literal[False]] = loop.create_future()
 
 
 class EntityRegistry:
@@ -457,7 +458,7 @@ class KocomGateway:
         self,
         waiter: _PendingWaiter,
         timeout: float,
-    ) -> DeviceState:
+    ) -> DeviceState | Literal[False]:
         try:
             return await asyncio.wait_for(waiter.future, timeout=timeout)
         finally:
@@ -468,7 +469,7 @@ class KocomGateway:
                 except ValueError:
                     pass
 
-    def _resolve_pending(self, result: bool) -> None:
+    def _resolve_pending(self, result: Literal[False]) -> None:
         for waiter in self._pendings:
             if not waiter.future.done():
                 waiter.future.set_result(result)

@@ -24,7 +24,7 @@ class KocomConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             host: str = user_input[CONF_HOST]
-            port: int = user_input[CONF_PORT]
+            port: int | None = user_input[CONF_PORT]
 
             # 시리얼의 경우 host가 "/"로 시작하면 장치 경로로 간주하고 port 무시
             if host.startswith("/"):

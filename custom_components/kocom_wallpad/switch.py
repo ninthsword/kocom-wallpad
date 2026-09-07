@@ -46,7 +46,8 @@ async def async_setup_entry(
     async_add_switch()
 
 
-class KocomSwitch(KocomBaseEntity, SwitchEntity):
+# Preserve the HA MRO mixing cached descriptors and dynamic properties.
+class KocomSwitch(KocomBaseEntity, SwitchEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
     """Representation of a Kocom switch."""
 
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
@@ -54,11 +55,13 @@ class KocomSwitch(KocomBaseEntity, SwitchEntity):
         super().__init__(gateway, device)
         
     @property
-    def device_class(self) -> SwitchDeviceClass:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def device_class(self) -> SwitchDeviceClass:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute.get("device_class", SwitchDeviceClass.SWITCH)
 
     @property
-    def is_on(self) -> bool:
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def is_on(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.state
 
     async def async_turn_on(self, **kwargs: Any) -> None:
