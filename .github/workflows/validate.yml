@@ -7,11 +7,14 @@ on:
     - cron: "0 0 * * 0"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   validate-hacs:
     runs-on: "ubuntu-latest"
     steps:
-      - uses: "actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26" # v3
+      - uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v6.0.2
       - name: HACS validation
         uses: "hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa"
         with:

@@ -17,6 +17,8 @@
             "single_instance_allowed": "Only a single configuration is allowed."
         },
         "error": {
+            "invalid_host": "Enter a host or serial device path.",
+            "invalid_port": "Enter a TCP port from 1 to 65535.",
             "cannot_connect": "Failed to connect."
         }
     },

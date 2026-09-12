@@ -123,8 +123,12 @@ class KocomController:
         while True:
             start = buf.find(PACKET_PREFIX)
             if start < 0:
-                # 프리픽스 이전의 쓰레기 데이터 제거
-                buf.clear()
+                # Keep a trailing partial prefix for the next transport chunk.
+                keep = 0
+                for size in range(1, len(PACKET_PREFIX)):
+                    if buf.endswith(PACKET_PREFIX[:size]):
+                        keep = size
+                del buf[:len(buf) - keep]
                 break
             if start > 0:
                 del buf[:start]
