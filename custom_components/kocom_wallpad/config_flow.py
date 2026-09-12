@@ -26,17 +26,23 @@ class KocomConfigFlow(ConfigFlow, domain=DOMAIN):
             host: str = user_input[CONF_HOST]
             port: int | None = user_input[CONF_PORT]
 
-            # 시리얼의 경우 host가 "/"로 시작하면 장치 경로로 간주하고 port 무시
+            if not host.strip():
+                errors[CONF_HOST] = "invalid_host"
+
+            # Preserve serial paths and existing host/unique ID spelling.
             if host.startswith("/"):
                 port = None
+            elif type(port) is not int or not 1 <= port <= 65535:
+                errors[CONF_PORT] = "invalid_port"
 
-            await self.async_set_unique_id(host)
-            self._abort_if_unique_id_configured()
+            if not errors:
+                await self.async_set_unique_id(host)
+                self._abort_if_unique_id_configured()
 
-            return self.async_create_entry(
-                title=host,
-                data={CONF_HOST: host, CONF_PORT: port}
-            )
+                return self.async_create_entry(
+                    title=host,
+                    data={CONF_HOST: host, CONF_PORT: port}
+                )
 
         schema = vol.Schema({
             vol.Required(CONF_HOST): str,

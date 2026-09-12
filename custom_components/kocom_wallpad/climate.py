@@ -11,7 +11,6 @@ from homeassistant.components.climate.const import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, Platform, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -193,9 +192,3 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
     async def async_set_temperature(self, **kwargs) -> None:
         args = {"target_temp": float(kwargs[ATTR_TEMPERATURE])}
         await self._async_send_or_raise("set temperature", "set_temperature", **args)
-
-    async def _async_send_or_raise(self, description: str, action: str, **args) -> None:
-        if not self.available:
-            raise HomeAssistantError("Kocom wallpad is unavailable")
-        if not await self.gateway.async_send_action(self._device.key, action, **args):
-            raise HomeAssistantError(f"Kocom wallpad could not {description}")

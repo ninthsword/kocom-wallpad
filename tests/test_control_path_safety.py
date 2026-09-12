@@ -93,8 +93,8 @@ def _install_homeassistant_shims() -> None:
     _set_attributes(light_const, ColorMode=vars(light)["ColorMode"])
     _set_attributes(components, light=light)
     for package, attr, value in (
-        ("sensor", "SensorDeviceClass", types.SimpleNamespace(TEMPERATURE="temperature")),
-        ("binary_sensor", "BinarySensorDeviceClass", types.SimpleNamespace(PROBLEM="problem")),
+        ("sensor", "SensorDeviceClass", types.SimpleNamespace(TEMPERATURE="temperature", CO2="co2", PM10="pm10", PM25="pm25", VOLATILE_ORGANIC_COMPOUNDS="volatile_organic_compounds", HUMIDITY="humidity")),
+        ("binary_sensor", "BinarySensorDeviceClass", types.SimpleNamespace(PROBLEM="problem", MOTION="motion")),
         ("switch", "SwitchDeviceClass", types.SimpleNamespace(OUTLET="outlet")),
     ):
         module = _module(f"homeassistant.components.{package}")
@@ -415,6 +415,229 @@ class ControllerSafetyTests(unittest.TestCase):
             state for state in living_states if state.key.sub_type == SubType.NONE
         )
         self.assertEqual(0, living.key.room_index)
+
+
+# Literal protocol fixtures specify the existing decoder contract, independent of
+# command generation. These synthetic reports are not physical-device captures.
+_REPORTS = {
+    "ac_on": "aa5530bc000100390200100003001a1600006b0d0d",
+    "ac_off": "aa5530bc000100390200000001001b1800005c0d0d",
+    "vent_on": "aa5530bc0001004800001102800007230200f40d0d",
+    "vent_off": "aa5530bc00010048000000010000060000003c0d0d",
+    "elevator_down": "aa5530bc0001004400000182000000000000b40d0d",
+    "elevator_arrival": "aa5530bc0001004400000331320000000000970d0d",
+    "motion_on": "aa5530bc0001006000040000000000000000510d0d",
+    "motion_off": "aa5530bc00010060000000000000000000004d0d0d",
+    "airquality_status": "aa5530bc00010098010023110258012c19328c0d0d",
+    "airquality_query": "aa5530bc00010098013a050003200000001e060d0d",
+}
+
+
+class ProtocolFixtureTests(unittest.TestCase):
+    def setUp(self):
+        self.states: list[DeviceState] = []
+        self.gateway = _ControllerGateway()
+        self.gateway.on_device_state = lambda _state: self.states.append(_state)
+        self.controller = KocomController(self.gateway)
+
+    def report(self, name):
+        packet = bytes.fromhex(_REPORTS[name])
+        self.assertEqual(21, len(packet))
+        self.assertEqual(sum(packet[2:18]) & 0xFF, packet[18])
+        start = len(self.states)
+        self.controller.feed(packet)
+        states = self.states[start:]
+        for state in states:
+            self.assertEqual(packet, state._packet)
+        return states
+
+    def assert_device(self, state, device_type, room, subtype, platform):
+        self.assertEqual(DeviceKey(device_type, room, 0, subtype), state.key)
+        self.assertEqual(platform, state.platform)
+
+    def test_consecutive_airconditioner_reports_replace_values(self):
+        for name, expected in (
+            ("ac_on", {"hvac_mode": "cool", "fan_mode": "high", "current_temp": 26.0, "target_temp": 22.0}),
+            ("ac_off", {"hvac_mode": "off", "fan_mode": "low", "current_temp": 27.0, "target_temp": 24.0}),
+        ):
+            states = self.report(name)
+            self.assertEqual(1, len(states))
+            state = states[0]
+            self.assert_device(state, DeviceType.AIRCONDITIONER, 2, SubType.NONE, Platform.CLIMATE)
+            self.assertEqual(expected, state.state)
+            self.assertEqual({
+                "hvac_modes": ["cool", "fan_only", "dry", "auto", "off"],
+                "fan_modes": ["low", "medium", "high", "auto"],
+                "feature_fan": True, "temp_step": 1.0,
+            }, state.attribute)
+        self.assertEqual(2, len(self.states))
+
+    def test_consecutive_ventilation_reports_and_support_entities(self):
+        first = self.report("vent_on")
+        second = self.report("vent_off")
+        self.assertEqual(3, len(first))
+        self.assertEqual(3, len(second))
+        for states, expected, co2, error in (
+            (first, {"state": True, "preset_mode": "auto", "speed": 128}, 735, True),
+            (second, {"state": False, "preset_mode": "ventilation", "speed": 0}, 600, False),
+        ):
+            self.assert_device(states[0], DeviceType.VENTILATION, 0, SubType.NONE, Platform.FAN)
+            self.assertEqual(expected, states[0].state)
+            self.assertEqual([64, 128, 192], states[0].attribute["speed_list"])
+            self.assert_device(states[1], DeviceType.VENTILATION, 0, SubType.CO2, Platform.SENSOR)
+            self.assertEqual(co2, states[1].state)
+            self.assertEqual({"device_class": "co2", "unit_of_measurement": "ppm"}, states[1].attribute)
+            self.assert_device(states[2], DeviceType.VENTILATION, 0, SubType.ERRCODE, Platform.BINARY_SENSOR)
+            self.assertIs(error, states[2].state)
+            self.assertEqual("problem", states[2].attribute["device_class"])
+        self.assertFalse(first[0].attribute["feature_preset"])
+        self.assertTrue(second[0].attribute["feature_preset"])
+        self.assertEqual(["ventilation", "auto"], second[0].attribute["preset_modes"])
+        self.assertEqual({"error_code": "02"}, first[2].attribute["extra_state"])
+        self.assertEqual({"error_code": "00"}, second[2].attribute["extra_state"])
+
+    def test_consecutive_elevator_direction_and_floor_reports(self):
+        for name, expected in (
+            ("elevator_down", [True, "downward", "B2"]),
+            ("elevator_arrival", [False, "arrival", "12"]),
+        ):
+            states = self.report(name)
+            self.assertEqual(expected, [state.state for state in states])
+            for state, subtype, platform in zip(states, (SubType.NONE, SubType.DIRECTION, SubType.FLOOR),
+                                                 (Platform.SWITCH, Platform.SENSOR, Platform.SENSOR), strict=True):
+                self.assert_device(state, DeviceType.ELEVATOR, 0, subtype, platform)
+                self.assertEqual({}, state.attribute)
+
+    def test_consecutive_motion_reports(self):
+        for name, expected in (("motion_on", True), ("motion_off", False)):
+            states = self.report(name)
+            self.assertEqual(1, len(states))
+            self.assert_device(states[0], DeviceType.MOTION, 0, SubType.NONE, Platform.BINARY_SENSOR)
+            self.assertIs(expected, states[0].state)
+            self.assertEqual({"device_class": "motion"}, states[0].attribute)
+
+    def test_consecutive_airquality_reports_and_zero_suppression(self):
+        first = self.report("airquality_status")
+        second = self.report("airquality_query")
+        expected = (
+            (SubType.PM10, 35, "pm10", "µg/m³"),
+            (SubType.PM25, 17, "pm25", "µg/m³"),
+            (SubType.CO2, 600, "co2", "ppm"),
+            (SubType.VOC, 300, "volatile_organic_compounds", "µg/m³"),
+            (SubType.TEMP, 25, "temperature", "°C"),
+            (SubType.HUMIDITY, 50, "humidity", "%"),
+        )
+        self.assertEqual(6, len(first))
+        for state, (subtype, value, device_class, unit) in zip(first, expected, strict=True):
+            self.assert_device(state, DeviceType.AIRQUALITY, 1, subtype, Platform.SENSOR)
+            self.assertEqual(value, state.state)
+            self.assertEqual({"device_class": device_class, "unit_of_measurement": unit}, state.attribute)
+        self.assertEqual([(SubType.PM10, 5), (SubType.CO2, 800), (SubType.HUMIDITY, 30)],
+                         [(state.key.sub_type, state.state) for state in second])
+
+    def test_complete_ac_and_vent_commands_and_confirmation_predicates(self):
+        cases = (
+            (DeviceType.AIRCONDITIONER, 2, Platform.CLIMATE, "set_hvac", {"hvac_mode": "cool"}, "hvac_mode", "cool", "off", "aa5530bc0039020100001000000000000000380d0d"),
+            (DeviceType.AIRCONDITIONER, 2, Platform.CLIMATE, "set_hvac", {"hvac_mode": "off"}, "hvac_mode", "off", "cool", "aa5530bc0039020100000000000000000000280d0d"),
+            (DeviceType.AIRCONDITIONER, 2, Platform.CLIMATE, "set_fan", {"fan_mode": "auto"}, "fan_mode", "auto", "low", "aa5530bc00390201000010000400000000003c0d0d"),
+            (DeviceType.AIRCONDITIONER, 2, Platform.CLIMATE, "set_temperature", {"target_temp": 23.0}, "target_temp", 23.0, 22.0, "aa5530bc00390201000010000000001700004f0d0d"),
+            (DeviceType.VENTILATION, 0, Platform.FAN, "turn_on", {}, "state", True, False, "aa5530bc0048000100001100000000000000460d0d"),
+            (DeviceType.VENTILATION, 0, Platform.FAN, "turn_off", {}, "state", False, True, "aa5530bc0048000100000000000000000000350d0d"),
+            (DeviceType.VENTILATION, 0, Platform.FAN, "set_preset", {"preset_mode": "bypass"}, "preset_mode", "bypass", "auto", "aa5530bc0048000100001103000000000000490d0d"),
+            (DeviceType.VENTILATION, 0, Platform.FAN, "set_percentage", {"speed": 192}, "speed", 192, 128, "aa5530bc0048000100001100c00000000000060d0d"),
+        )
+        for device_type, room, platform, action, args, field, match, mismatch, hex_packet in cases:
+            with self.subTest(device=device_type, action=action, args=args):
+                key = DeviceKey(device_type, room, 0, SubType.NONE)
+                packet, expect, timeout = self.controller.generate_command(key, action, **args)
+                self.assertEqual(bytes.fromhex(hex_packet), packet)
+                self.assertEqual(21, len(packet))
+                self.assertEqual(sum(packet[2:18]) & 0xFF, packet[18])
+                self.assertEqual(1.5 if action == "set_temperature" else 1.0, timeout)
+                self.assertTrue(expect(DeviceState(key, platform, {}, {field: match})))
+                self.assertFalse(expect(DeviceState(key, platform, {}, {field: mismatch})))
+                self.assertFalse(expect(DeviceState(key, platform, {}, {})))
+                self.assertFalse(expect(DeviceState(key, platform, {}, True)))
+                for other in (
+                    DeviceKey(device_type, room + 1, 0, SubType.NONE),
+                    DeviceKey(device_type, room, 1, SubType.NONE),
+                    DeviceKey(device_type, room, 0, SubType.CO2),
+                    DeviceKey(DeviceType.MOTION, room, 0, SubType.NONE),
+                ):
+                    self.assertFalse(expect(DeviceState(other, platform, {}, {field: match})))
+
+
+class FramingRegressionTests(unittest.TestCase):
+    def collect(self):
+        states: list[DeviceState] = []
+        gateway = _ControllerGateway()
+        gateway.on_device_state = lambda _state: states.append(_state)
+        return KocomController(gateway), states
+
+    def test_every_split_offset_for_each_report(self):
+        for name, hex_packet in _REPORTS.items():
+            packet = bytes.fromhex(hex_packet)
+            expected_controller, expected = self.collect()
+            expected_controller.feed(packet)
+            self.assertTrue(expected)
+            for offset in range(len(packet) + 1):
+                with self.subTest(report=name, offset=offset):
+                    controller, states = self.collect()
+                    controller.feed(packet[:offset])
+                    self.assertEqual(len(expected) if offset == len(packet) else 0, len(states))
+                    controller.feed(packet[offset:])
+                    self.assertEqual(expected, states)
+                    controller.feed(b"")
+                    self.assertEqual(expected, states)
+                    self.assertEqual(b"", controller._rx_buf)
+
+    def test_bytewise_and_concatenated_reports_have_no_early_or_duplicate_callbacks(self):
+        packets = [bytes.fromhex(_REPORTS[name]) for name in ("ac_on", "ac_off")]
+        controller, states = self.collect()
+        for count, packet in enumerate(packets):
+            for index, byte in enumerate(packet):
+                controller.feed(bytes([byte]))
+                self.assertEqual(count + (index == len(packet) - 1), len(states))
+        joined_controller, joined = self.collect()
+        joined_controller.feed(b"".join(packets))
+        self.assertEqual(states, joined)
+        joined_controller.feed(b"")
+        self.assertEqual(2, len(joined))
+
+    def test_garbage_partial_prefixes_and_repeated_prefix_bytes(self):
+        packet = bytes.fromhex(_REPORTS["ac_on"])
+        for garbage in (b"\x00\x55\x01", b"\xaa\xaa", b"\xaa\x00\x55"):
+            with self.subTest(garbage=garbage):
+                controller, states = self.collect()
+                controller.feed(garbage + packet[:1])
+                self.assertEqual([], states)
+                self.assertEqual(b"\xaa", controller._rx_buf)
+                controller.feed(packet[1:])
+                self.assertEqual(1, len(states))
+                self.assertEqual(packet, states[0]._packet)
+        controller, states = self.collect()
+        controller.feed(b"\xaa")
+        controller.feed(b"\x00")
+        self.assertEqual(b"", controller._rx_buf)
+        controller.feed(packet)
+        self.assertEqual(1, len(states))
+
+    def test_invalid_suffix_checksum_and_following_fragment_recover(self):
+        packet = bytes.fromhex(_REPORTS["ac_on"])
+        invalid_suffix = packet[:-1] + b"\x00"
+        invalid_checksum = packet[:18] + bytes([packet[18] ^ 1]) + packet[19:]
+        for corrupt in (invalid_suffix, invalid_checksum, invalid_suffix + invalid_checksum):
+            with self.subTest(corrupt=corrupt):
+                controller, states = self.collect()
+                controller.feed(corrupt + packet[:1])
+                self.assertEqual([], states)
+                controller.feed(packet[1:-1])
+                self.assertEqual([], states)
+                controller.feed(packet[-1:])
+                self.assertEqual(1, len(states))
+                self.assertEqual(packet, states[0]._packet)
+                controller.feed(b"")
+                self.assertEqual(1, len(states))
 
 
 class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
@@ -1091,7 +1314,7 @@ class SetupCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         manifest = json.loads(
             (Path(__file__).parents[1] / "custom_components/kocom_wallpad/manifest.json").read_text()
         )
-        self.assertIn("pyserial-asyncio-fast", manifest["requirements"])
+        self.assertIn("pyserial-asyncio-fast==0.16", manifest["requirements"])
         transport = (
             Path(__file__).parents[1] / "custom_components/kocom_wallpad/transport.py"
         ).read_text()

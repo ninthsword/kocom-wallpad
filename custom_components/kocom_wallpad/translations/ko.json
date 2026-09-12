@@ -17,6 +17,8 @@
             "single_instance_allowed": "단일 구성만 허용됩니다."
         },
         "error": {
+            "invalid_host": "호스트 또는 시리얼 장치 경로를 입력하세요.",
+            "invalid_port": "TCP 포트는 1부터 65535 사이의 값으로 입력하세요.",
             "cannot_connect": "연결할 수 없습니다."
         }
     },
