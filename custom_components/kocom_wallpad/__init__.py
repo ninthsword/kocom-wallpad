@@ -16,7 +16,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host: str = entry.data[CONF_HOST]
     port: int = entry.data[CONF_PORT]
 
-    dr.async_get(hass).async_get_or_create(
+    parent = dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, str(host))},
         manufacturer="KOCOM",
@@ -25,6 +25,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     gateway = KocomGateway(hass, entry, host=host, port=port)
+    gateway.device_registry_id = parent.id
     await gateway.async_get_entity_registry()
     await gateway.async_start()
 
