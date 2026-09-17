@@ -52,7 +52,7 @@ def _run_real_ha_tests():
             # Fail immediately on an accidental TCP or serial probe.
             for target in (
                 "asyncio.open_connection",
-                "serial_asyncio_fast.open_serial_connection",
+                "serialx.open_serial_connection",
             ):
                 probe = patch(target, side_effect=AssertionError("Unexpected transport probe"))
                 probe.start()

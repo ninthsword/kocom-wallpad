@@ -53,7 +53,7 @@ class KocomBaseEntity(RestoreEntity):
             manufacturer="KOCOM Co., Ltd",
             model="Smart Wallpad",
             name=f"{self.format_identifiers}",
-            via_device=(DOMAIN, str(self.gateway.host)),
+            via_device_id=self.gateway.device_registry_id,
         )
         
     @property

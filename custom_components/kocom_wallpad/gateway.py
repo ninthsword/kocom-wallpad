@@ -120,6 +120,7 @@ class KocomGateway:
         """Initialize the gateway."""
         self.hass = hass
         self.entry = entry
+        self.device_registry_id: str | None = None
         self.host = host
         self.port = port
         self.conn = AsyncConnection(host=host, port=port)

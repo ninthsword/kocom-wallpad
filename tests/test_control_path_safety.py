@@ -158,7 +158,7 @@ def _install_homeassistant_shims() -> None:
     _set_attributes(helpers, device_registry=device_registry)
     _set_attributes(helpers, restore_state=restore_state)
     _set_attributes(helpers, dispatcher=dispatcher)
-    _set_attributes(_module("serial_asyncio_fast"), open_serial_connection=None)
+    _set_attributes(_module("serialx"), open_serial_connection=None)
     util = _module("homeassistant.util")
     percentage = _module("homeassistant.util.percentage")
     _set_attributes(percentage, ordered_list_item_to_percentage=lambda values, value: int(
@@ -1203,6 +1203,7 @@ class ClimateBootstrapSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_connected_restored_climate_is_commandable_but_unknown(self):
         gateway = create_autospec(KocomGateway, instance=True,
             host="test",
+            device_registry_id="parent-registry-id",
             is_transport_available=lambda: True,
             is_device_state_confirmed=lambda _key: False,
             async_send_action=AsyncMock(return_value=True),
@@ -1220,6 +1221,7 @@ class ClimateBootstrapSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_disconnected_climate_rejects_command(self):
         gateway = create_autospec(KocomGateway, instance=True,
             host="test",
+            device_registry_id="parent-registry-id",
             is_transport_available=lambda: False,
             is_device_state_confirmed=lambda _key: False,
             async_send_action=AsyncMock(return_value=True),
@@ -1252,6 +1254,7 @@ class EntityActionSafetyTests(unittest.IsolatedAsyncioTestCase):
     def _gateway(result, available=True):
         return create_autospec(KocomGateway, instance=True,
             host="test",
+            device_registry_id="parent-registry-id",
             controller=types.SimpleNamespace(_device_storage={}),
             is_device_available=lambda _key: available,
             async_send_action=AsyncMock(return_value=result),
@@ -1310,15 +1313,15 @@ class EntityActionSafetyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SetupCompatibilityTests(unittest.IsolatedAsyncioTestCase):
-    def test_manifest_and_transport_use_serial_asyncio_fast(self):
+    def test_manifest_and_transport_use_serialx(self):
         manifest = json.loads(
             (Path(__file__).parents[1] / "custom_components/kocom_wallpad/manifest.json").read_text()
         )
-        self.assertIn("pyserial-asyncio-fast==0.16", manifest["requirements"])
+        self.assertIn("serialx==1.10.0", manifest["requirements"])
         transport = (
             Path(__file__).parents[1] / "custom_components/kocom_wallpad/transport.py"
         ).read_text()
-        self.assertIn("import serial_asyncio_fast", transport)
+        self.assertIn("import serialx", transport)
         self.assertNotIn("import serial_asyncio\n", transport)
 
     async def test_parent_device_is_registered_before_platform_forwarding(self):
@@ -1342,7 +1345,7 @@ class SetupCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         class FakeDeviceRegistry:
             def async_get_or_create(self, **kwargs):
                 events.append(("parent", kwargs))
-                return object()
+                return types.SimpleNamespace(id="parent-registry-id")
 
         async def forward(_entry, _platforms):
             events.append("forward")
