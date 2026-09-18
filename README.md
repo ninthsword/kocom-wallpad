@@ -3,12 +3,12 @@
 # Kocom Wallpad Integration for Home Assistant
 Home Assistant를 위한 Kocom Wallpad 통합구성요소
 
-This maintained fork is based on [lunDreame's original integration](https://github.com/lunDreame/kocom-wallpad).
-Upstream authorship and the Apache license are retained.
+이 유지보수 포크는 [lunDreame의 원본 통합구성요소](https://github.com/lunDreame/kocom-wallpad)를 기반으로 합니다.
+원저작권과 Apache 라이선스는 그대로 유지됩니다.
 
-Home Assistant 2026.8.0 or newer is required, matching the tested development
-baseline. Earlier Home Assistant versions are no longer supported by this release;
-upgrade Home Assistant before installing it.
+Home Assistant 2026.8.0 이상이 필요하며, 이는 테스트된 개발 기준과 일치합니다.
+이전 버전의 Home Assistant는 이번 릴리스에서 더 이상 지원하지 않으므로,
+설치 전에 Home Assistant를 먼저 업그레이드해 주세요.
 
 ## 기여
 문제가 있나요? [Issues](https://github.com/ninthsword/kocom-wallpad/issues) 탭에 작성해 주세요.
@@ -52,13 +52,13 @@ upgrade Home Assistant before installing it.
 
 - **초기 장치 추가 시에는 최초 한번은 장치를 ON/OFF 하셔야 합니다.**
 - 엘리베이터의 경우 현관 스위치가 있는 경우 현관 스위치에서 호출하셔야 정상적으로 등록됩니다.
-- For device support and other requests, use the [maintained issue tracker](https://github.com/ninthsword/kocom-wallpad/issues).
+- 기기 지원 및 기타 요청 사항은 [유지보수 이슈 트래커](https://github.com/ninthsword/kocom-wallpad/issues)를 이용해 주세요.
 
 ## 디버깅
 - 문제 파악을 위해 아래 코드를 `configuration.yaml` 파일에 추가 후 HomeAssistant를 재시작해 주세요.
 - 디버깅 외에는 활성화하지 마세요.
 
-Report debugging issues through the [maintained issue tracker](https://github.com/ninthsword/kocom-wallpad/issues).
+디버깅 관련 문제는 [유지보수 이슈 트래커](https://github.com/ninthsword/kocom-wallpad/issues)를 통해 제보해 주세요.
 
 ```yaml
 logger:
@@ -70,13 +70,13 @@ logger:
 ## 라이선스
 Kocom WallPad 통합은 [Apache License](./LICENSE)를 따릅니다.
 
-## Development checks
+## 개발 검증
 
-Use Python 3.14.7, uv 0.12.5 and Node.js 24. The hash-locked development dependencies
-include Home Assistant 2026.8.0, pyserial-asyncio-fast 0.16 and Ruff 0.16.4.
-Pyright 1.1.413 is isolated under `devtools/pyright`. The runtime serial dependency is pinned to the tested version.
-Python 3.11 syntax compatibility is retained; the supported Home Assistant minimum
-is 2026.8.0.
+Python 3.14.7, uv 0.12.5, Node.js 24를 사용합니다. 해시 잠금된 개발 의존성에는
+Home Assistant 2026.8.0, pyserial-asyncio-fast 0.16, Ruff 0.16.4가 포함됩니다.
+Pyright 1.1.413은 `devtools/pyright` 아래에 격리되어 있습니다. 런타임 시리얼 의존성은 테스트된 버전으로 고정되어 있습니다.
+Python 3.11 구문 호환성은 계속 유지되며, 지원하는 Home Assistant 최소 버전은
+2026.8.0입니다.
 
 ```sh
 python3 -m pip install uv==0.12.5
@@ -88,17 +88,17 @@ devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --python
 .venv/bin/python -B -m unittest discover -s tests -v
 ```
 
-Pyright checks all 14 integration modules and the offline regression module against
-real development dependencies. Config-flow tests run in a fresh subprocess with
-real Home Assistant, isolated from the protocol shims. The other tests use narrow Home Assistant shims and fake
-transports to verify packet bytes, confirmation, reconnect and shutdown behavior
-without network access or devices. They also protect the `DeviceState` constructor,
-dataclass fields, serialization and initially absent dynamic metadata.
+Pyright는 14개 통합구성요소 모듈과 오프라인 회귀 테스트 모듈 전체를
+실제 개발 의존성을 기준으로 검사합니다. Config-flow 테스트는 프로토콜 shim과 분리된
+새 서브프로세스에서 실제 Home Assistant로 실행됩니다. 나머지 테스트는 좁은 범위의 Home Assistant shim과 가짜
+트랜스포트를 사용해 네트워크나 실제 장치 접근 없이 패킷 바이트, 확인 응답, 재연결,
+종료 동작을 검증합니다. 또한 `DeviceState` 생성자, 데이터클래스 필드,
+직렬화, 초기에 존재하지 않는 동적 메타데이터도 함께 보호합니다.
 
-Keep `requirements-dev.in` and its hash-checked `requirements-dev.lock` together when
-intentionally updating dependencies. CI runs these checks and parses runtime source
-with Python 3.11 syntax rules. These checks do not install the integration into
-Home Assistant or operate services or devices.
+의존성을 의도적으로 갱신할 때는 `requirements-dev.in`과 해시로 검증되는
+`requirements-dev.lock`을 항상 함께 갱신하세요. CI는 이 검사들을 실행하고
+런타임 소스를 Python 3.11 구문 규칙으로 파싱합니다. 이 검사들은 통합구성요소를
+Home Assistant에 설치하거나 서비스·장치를 동작시키지 않습니다.
 
 
 ## Home Assistant 2026.9 호환성 검증
