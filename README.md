@@ -73,7 +73,7 @@ Kocom WallPad 통합은 [Apache License](./LICENSE)를 따릅니다.
 ## 개발 검증
 
 Python 3.14.7, uv 0.12.5, Node.js 24를 사용합니다. 해시 잠금된 개발 의존성에는
-Home Assistant 2026.8.0, pyserial-asyncio-fast 0.16, Ruff 0.16.4가 포함됩니다.
+Home Assistant 2026.8.0, serialx 1.11.0, Ruff 0.16.4가 포함됩니다.
 Pyright 1.1.413은 `devtools/pyright` 아래에 격리되어 있습니다. 런타임 시리얼 의존성은 테스트된 버전으로 고정되어 있습니다.
 Python 3.11 구문 호환성은 계속 유지되며, 지원하는 Home Assistant 최소 버전은
 2026.8.0입니다.
