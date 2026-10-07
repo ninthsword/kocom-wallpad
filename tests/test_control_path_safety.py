@@ -1317,7 +1317,7 @@ class SetupCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         manifest = json.loads(
             (Path(__file__).parents[1] / "custom_components/kocom_wallpad/manifest.json").read_text()
         )
-        self.assertIn("serialx==1.11.0", manifest["requirements"])
+        self.assertIn("serialx>=1.11.0", manifest["requirements"])
         transport = (
             Path(__file__).parents[1] / "custom_components/kocom_wallpad/transport.py"
         ).read_text()

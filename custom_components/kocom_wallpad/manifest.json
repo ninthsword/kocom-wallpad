@@ -9,7 +9,7 @@
     "iot_class": "local_push",
     "issue_tracker": "https://github.com/ninthsword/kocom-wallpad/issues",
     "requirements": [
-        "serialx==1.11.0"
+        "serialx>=1.11.0"
     ],
     "version": "2.0.5"
 }
