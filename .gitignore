@@ -182,3 +182,4 @@ cython_debug/
 /devtools/pyright/node_modules/
 **/__pycache__/
 /.ruff_cache/
+/.venv-ha2026.10/

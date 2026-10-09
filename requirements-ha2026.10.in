@@ -1,0 +1,4 @@
+serialx==1.11.0
+ruff==0.16.4
+pytest-homeassistant-custom-component==0.13.370
+homeassistant==2026.10.0

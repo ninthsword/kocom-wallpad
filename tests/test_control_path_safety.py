@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import asdict, fields
 from enum import Enum, IntFlag
 from pathlib import Path
-from unittest.mock import AsyncMock, create_autospec, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 
 def _module(name: str) -> types.ModuleType:
@@ -638,6 +638,133 @@ class FramingRegressionTests(unittest.TestCase):
                 self.assertEqual(packet, states[0]._packet)
                 controller.feed(b"")
                 self.assertEqual(1, len(states))
+
+
+class RestoreStateAccessorTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        with patch.object(gateway_module, "AsyncConnection", _FakeConnection):
+            self.gateway = KocomGateway(
+                create_autospec(HomeAssistant, instance=True),
+                create_autospec(ConfigEntry, instance=True, entry_id="entry"),
+                "test", 1,
+            )
+        self.entity_id = "climate.thermostat_1"
+        self.key = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
+        self.packet = _thermostat_frame(21, 20).raw
+        self.device_storage = {"restored_marker": ["preserved"]}
+        self.stored_state = types.SimpleNamespace(extra_data=types.SimpleNamespace(
+            as_dict=lambda: {
+                "packet": self.packet.hex(),
+                "device_storage": self.device_storage,
+            }
+        ))
+
+    async def _restore(self, store) -> None:
+        entry = types.SimpleNamespace(
+            entity_id=self.entity_id, unique_id=f"{self.key.unique_id}:test"
+        )
+        registry = types.SimpleNamespace(async_get=lambda entity_id: entry)
+        with (
+            patch.object(gateway_module.er, "async_get", return_value=registry),
+            patch.object(
+                gateway_module.er, "async_entries_for_config_entry", return_value=[entry]
+            ),
+            patch.object(
+                gateway_module.restore_state, "async_get", return_value=store
+            ) as get_store,
+        ):
+            await self.gateway.async_get_entity_registry()
+            get_store.assert_called_once_with(self.gateway.hass)
+
+    def _assert_restored(self) -> DeviceState:
+        device = self.gateway.registry.get(self.key)
+        assert device is not None
+        self.assertEqual(self.packet, device._packet)
+        self.assertEqual(
+            {"restored_marker": ["preserved"]}, self.gateway.controller._device_storage
+        )
+        self.assertFalse(self.gateway._restore_mode)
+        self.assertIsNone(self.gateway._force_register_uid)
+        self.assertTrue(self.gateway.is_transport_available())
+        self.assertFalse(self.gateway.is_device_state_confirmed(self.key))
+        self.assertFalse(self.gateway.is_device_available(self.key))
+        return device
+
+    async def test_modern_accessor_without_legacy_store(self):
+        accessor = Mock(return_value=self.stored_state)
+        await self._restore(types.SimpleNamespace(async_get_stored_state=accessor))
+
+        accessor.assert_called_once_with(self.entity_id)
+        self._assert_restored()
+        self.gateway.controller._dispatch_packet(self.packet)
+        self.assertTrue(self.gateway.is_device_state_confirmed(self.key))
+        self.assertTrue(self.gateway.is_device_available(self.key))
+
+    async def test_legacy_store_restores_identical_packet_and_device_storage(self):
+        await self._restore(types.SimpleNamespace(
+            last_states={self.entity_id: self.stored_state}
+        ))
+        legacy = self._assert_restored()
+        self.gateway.registry = gateway_module.EntityRegistry()
+        self.gateway.controller._device_storage = {}
+
+        await self._restore(types.SimpleNamespace(
+            async_get_stored_state=Mock(return_value=self.stored_state)
+        ))
+        modern = self._assert_restored()
+        self.assertEqual(asdict(legacy), asdict(modern))
+        self.assertEqual(legacy._packet, modern._packet)
+
+    async def test_noncallable_accessor_uses_legacy_store(self):
+        await self._restore(types.SimpleNamespace(
+            async_get_stored_state=None,
+            last_states={self.entity_id: self.stored_state},
+        ))
+        self._assert_restored()
+
+    async def test_modern_none_does_not_read_legacy_store(self):
+        accessor = Mock(return_value=None)
+        legacy = Mock()
+        legacy.get.side_effect = AssertionError("Legacy store must not be read")
+        await self._restore(types.SimpleNamespace(
+            async_get_stored_state=accessor, last_states=legacy
+        ))
+        accessor.assert_called_once_with(self.entity_id)
+        legacy.get.assert_not_called()
+        self.assertIsNone(self.gateway.registry.get(self.key))
+        self.assertEqual({}, self.gateway.controller._device_storage)
+
+    async def test_modern_error_propagates_without_reading_legacy_store(self):
+        error = RuntimeError("Restore accessor failed")
+        accessor = Mock(side_effect=error)
+        legacy = Mock()
+        legacy.get.side_effect = AssertionError("Legacy store must not be read")
+        with self.assertRaises(RuntimeError) as raised:
+            await self._restore(types.SimpleNamespace(
+                async_get_stored_state=accessor, last_states=legacy
+            ))
+        self.assertIs(error, raised.exception)
+        accessor.assert_called_once_with(self.entity_id)
+        legacy.get.assert_not_called()
+        self.assertFalse(self.gateway._restore_mode)
+        self.assertIsNone(self.gateway.registry.get(self.key))
+
+    async def test_missing_extra_data_or_packet_does_not_dispatch(self):
+        for stored_state in (
+            None,
+            types.SimpleNamespace(extra_data=None),
+            types.SimpleNamespace(extra_data=types.SimpleNamespace(as_dict=dict)),
+            types.SimpleNamespace(extra_data=types.SimpleNamespace(
+                as_dict=lambda: {"packet": "", "device_storage": self.device_storage}
+            )),
+        ):
+            with self.subTest(stored_state=stored_state):
+                await self._restore(types.SimpleNamespace(
+                    async_get_stored_state=Mock(return_value=stored_state)
+                ))
+                self.assertIsNone(self.gateway.registry.get(self.key))
+                self.assertEqual({}, self.gateway.controller._device_storage)
+                self.assertFalse(self.gateway.is_device_state_confirmed(self.key))
 
 
 class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
@@ -1317,7 +1444,7 @@ class SetupCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         manifest = json.loads(
             (Path(__file__).parents[1] / "custom_components/kocom_wallpad/manifest.json").read_text()
         )
-        self.assertIn("serialx==1.10.0", manifest["requirements"])
+        self.assertIn("serialx>=1.11.0", manifest["requirements"])
         transport = (
             Path(__file__).parents[1] / "custom_components/kocom_wallpad/transport.py"
         ).read_text()

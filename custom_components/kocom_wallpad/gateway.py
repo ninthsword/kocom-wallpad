@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -363,7 +363,12 @@ class KocomGateway:
         return self.registry.all_by_platform(platform)
 
     async def _async_put_entity_dispatch_packet(self, entity_id: str) -> None:
-        state = restore_state.async_get(self.hass).last_states.get(entity_id)
+        store = restore_state.async_get(self.hass)
+        get_stored_state = getattr(store, "async_get_stored_state", None)
+        if callable(get_stored_state):
+            state = cast("restore_state.StoredState | None", get_stored_state(entity_id))
+        else:
+            state = store.last_states.get(entity_id)
         if not (state and state.extra_data):
             return
         packet = state.extra_data.as_dict().get("packet")
