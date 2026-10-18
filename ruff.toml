@@ -1,0 +1,12 @@
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "B", "ASYNC", "RUF"]
+# navien_smart_ha's ignores, plus ASYNC109: the timeout parameters of gateway.py:466 and
+# transport.py:95 (and the tests' fakes of them) are part of the device transport API.
+ignore = ["E501", "RUF012", "ASYNC109"]
+
+[lint.per-file-ignores]
+# The tests import the integration after installing their Home Assistant shims and may read
+# fixtures with pathlib.
+"tests/**" = ["E402", "ASYNC240"]

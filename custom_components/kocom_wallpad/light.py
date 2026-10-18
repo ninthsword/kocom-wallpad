@@ -52,7 +52,7 @@ class KocomLight(KocomBaseEntity, LightEntity):  # pyright: ignore[reportIncompa
     """Representation of a Kocom light."""
 
     # HA types this instance attribute; preserve the existing shared, unmodified default.
-    _attr_supported_color_modes: set[ColorMode] | None = {ColorMode.ONOFF}  # noqa: RUF012
+    _attr_supported_color_modes: set[ColorMode] | None = {ColorMode.ONOFF}
     _attr_color_mode = ColorMode.ONOFF
 
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
