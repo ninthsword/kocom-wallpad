@@ -183,3 +183,4 @@ cython_debug/
 **/__pycache__/
 /.ruff_cache/
 /.venv-ha2026.10/
+/.venv-ui/
