@@ -48,6 +48,9 @@ class KocomConfigFlow(ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_HOST): str,
             vol.Required(CONF_PORT, default=DEFAULT_TCP_PORT): int,
         })
+        if user_input is not None:
+            # Show the rejected values again so the user corrects them instead of retyping both.
+            schema = self.add_suggested_values_to_schema(schema, user_input)
         return self.async_show_form(
             step_id="user", data_schema=schema, errors=errors
         )

@@ -93,6 +93,24 @@ def _run_real_ha_tests():
                     self.assertEqual(errors, result.get("errors"))
             self.unique_id.assert_not_awaited()
 
+        async def test_rejected_input_is_suggested_again(self):
+            initial = (await self.flow.async_step_user()).get("data_schema")
+            assert initial is not None
+            self.assertEqual(
+                {}, {str(key): key.description for key in initial.schema if key.description}
+            )
+            for host, port in (("wallpad.example", 0), ("", 8899), (" \t\n", 70000)):
+                with self.subTest(host=host, port=port):
+                    result = await self.flow.async_step_user({"host": host, "port": port})
+                    self.assertEqual(FlowResultType.FORM, result.get("type"))
+                    schema = result.get("data_schema")
+                    assert schema is not None
+                    suggested = {
+                        str(key): (key.description or {}).get("suggested_value")
+                        for key in schema.schema
+                    }
+                    self.assertEqual({"host": host, "port": port}, suggested)
+
         async def test_tcp_and_serial_keep_spelling_and_identity(self):
             for host, port, expected_port in (
                 ("WallPad.Example", 1, 1),
