@@ -107,6 +107,16 @@ def unseen(locator: Locator, text: str, screen: str) -> None:
         raise StepError(f"{screen}: '{text}' still visible") from err
 
 
+def kept(field: Locator, value: str, label: str, screen: str) -> None:
+    """Fail the step unless the field still holds the value the user typed, within 30 s."""
+    try:
+        expect(field).to_have_value(value, timeout=WAIT_MS)
+    except AssertionError as err:
+        raise StepError(
+            f"{screen}: {label} holds '{field.input_value()}' instead of '{value}'"
+        ) from err
+
+
 def see_text(page: Page, text: str, screen: str, *, exact: bool = False) -> None:
     see(page.get_by_text(text, exact=exact), text, screen)
 
@@ -182,9 +192,10 @@ def steps(page: Page, base: str, shots: Shots, wallpad_port: int) -> None:
     port.fill("0")
     page.get_by_role("button", name=re.compile("^(확인|제출)$")).click()
     see_text(page, PORT_ERROR, f"{screen} with port 0")
+    # The form keeps what was typed after an error, so only the port is corrected.
+    kept(host, HOST, "호스트", f"{screen} after the port error")
+    kept(port, "0", "포트", f"{screen} after the port error")
     shots.take(page, "04-flow-port-error")
-    # The form comes back with its defaults after an error, so both fields are filled again.
-    host.fill(HOST)
     port.fill(str(wallpad_port))
     shots.take(page, "05-flow-user")
     page.get_by_role("button", name=re.compile("^(확인|제출)$")).click()
