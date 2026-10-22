@@ -846,6 +846,115 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
             gateway_module.SEND_RETRY_MAX = old_retry
         self.assertEqual([], self.gateway._pendings)
 
+    async def test_equal_live_primary_thermostat_reports_publish_once(self):
+        first_packet = _thermostat_frame(21, 20).raw
+        self.gateway.controller.feed(first_packet)
+        key = self._thermostat_state(1).key
+        original = self.gateway.registry.get(key)
+        assert original is not None
+        unmatched = self.gateway._register_confirmation(
+            self._thermostat_state(2).key, lambda _dev: True
+        )
+        for marker in (1, 2):
+            raw = bytearray(first_packet)
+            raw[17] = marker
+            raw[18] = sum(raw[2:18]) % 256
+            packet = bytes(raw)
+            order = []
+            waiter = self.gateway._register_confirmation(
+                key, lambda dev, events=order: events.append(("pending", dev)) is None
+            )
+            with (
+                patch.object(gateway_module, "async_dispatcher_send", side_effect=(
+                    lambda _hass, _signal, dev, events=order: events.append(("publish", dev))
+                )) as publish,
+                patch.object(self.gateway, "on_device_state", wraps=self.gateway.on_device_state) as receive,
+            ):
+                self.gateway.controller.feed(packet)
+
+            incoming = next(
+                call.args[0] for call in receive.call_args_list if call.args[0].key == key
+            )
+            self.assertIsNot(original, incoming)
+            self.assertEqual(original, incoming)
+            self.assertEqual(packet, incoming._packet)
+            publish.assert_called_once_with(
+                self.gateway.hass, self.gateway.async_signal_device_updated(key.unique_id), incoming
+            )
+            self.assertIs(incoming, publish.call_args.args[-1])
+            self.assertEqual([("publish", incoming), ("pending", incoming)], order)
+            self.assertIs(incoming, waiter.future.result())
+            self.assertFalse(unmatched.future.done())
+        self.assertEqual([], self.connection.sent)
+        self.assertTrue(self.gateway._tx_queue.empty())
+        self.assertIsNone(self.gateway._task_bootstrap_queries)
+        self.gateway._resolve_pending(False)
+
+    async def test_non_live_or_other_device_reports_do_not_refresh(self):
+        packet = _thermostat_frame(21, 20).raw
+        self.gateway.controller.feed(packet)
+        key = self._thermostat_state(1).key
+        with (
+            patch.object(gateway_module, "async_dispatcher_send") as publish,
+            patch.object(self.gateway, "_notify_pendings") as notify,
+        ):
+            self.gateway._restore_mode = True
+            self.gateway.controller.feed(packet)
+            self.gateway._restore_mode = False
+            self.connection.connected = False
+            self.gateway.controller.feed(packet)
+            self.connection.connected = True
+            self.gateway.controller.feed(_thermostat_frame(21, 20, packet_type=0x0D, mirrored=True).raw)
+            self.gateway.controller.feed(_thermostat_frame(21, 20, command=0x3A).raw)
+            corrupt = bytearray(packet)
+            corrupt[18] ^= 1
+            self.gateway.controller.feed(bytes(corrupt))
+            corrupt = bytearray(packet)
+            corrupt[-1] = 0
+            self.gateway.controller.feed(bytes(corrupt))
+            publish.assert_not_called()
+            notify.assert_not_called()
+
+        other_packet = _thermostat_frame(21, 20, room=2).raw
+        self.gateway.controller.feed(other_packet)
+        with patch.object(gateway_module, "async_dispatcher_send") as publish:
+            self.gateway.controller.feed(_thermostat_frame(22, 20, room=2).raw)
+            publish.assert_called_once()
+            other = publish.call_args.args[-1]
+            self.assertEqual(self._thermostat_state(2).key, other.key)
+            self.assertNotEqual(key, other.key)
+            self.assertEqual(
+                self.gateway.async_signal_device_updated(other.key.unique_id),
+                publish.call_args.args[1],
+            )
+
+        excluded = [
+            self._state(True),
+            DeviceState(DeviceKey(DeviceType.AIRCONDITIONER, 1, 0, SubType.NONE), Platform.CLIMATE, {}, {}),
+            DeviceState(key, Platform.SENSOR, {}, 20),
+            *(
+                DeviceState(DeviceKey(DeviceType.THERMOSTAT, 3, 0, subtype), platform, {}, 20)
+                for subtype, platform in (
+                    (SubType.HOTTEMP, Platform.SENSOR),
+                    (SubType.HEATTEMP, Platform.SENSOR),
+                    (SubType.ERRCODE, Platform.BINARY_SENSOR),
+                )
+            ),
+        ]
+        for dev in excluded:
+            with self.subTest(key=dev.key, platform=dev.platform):
+                self.gateway.on_device_state(dev)
+                incoming = DeviceState(dev.key, dev.platform, dict(dev.attribute), dev.state)
+                with (
+                    patch.object(gateway_module, "async_dispatcher_send") as publish,
+                    patch.object(self.gateway, "_notify_pendings") as notify,
+                ):
+                    self.gateway.on_device_state(incoming)
+                    publish.assert_not_called()
+                    notify.assert_called_once_with(incoming)
+        self.assertEqual([], self.connection.sent)
+        self.assertTrue(self.gateway._tx_queue.empty())
+
     async def test_restored_state_is_commandable_but_unconfirmed_until_live_packet(self):
         state = self._state(True)
         self.gateway._restore_mode = True

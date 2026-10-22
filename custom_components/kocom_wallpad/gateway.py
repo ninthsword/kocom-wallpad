@@ -243,7 +243,13 @@ class KocomGateway:
                 self._notify_pendings(dev)
             return
 
-        if changed or availability_changed:
+        is_live_thermostat_report = (
+            is_live
+            and dev.key.device_type == DeviceType.THERMOSTAT
+            and dev.key.sub_type == SubType.NONE
+            and dev.platform == Platform.CLIMATE
+        )
+        if changed or availability_changed or is_live_thermostat_report:
             LOGGER.debug("Device state has been changed. Update -> %s", dev.key)
             async_dispatcher_send(
                 self.hass,
