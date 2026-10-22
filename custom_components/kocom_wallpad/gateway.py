@@ -16,6 +16,8 @@ from homeassistant.helpers import restore_state
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
+    BOOTSTRAP_REQUERY_INTERVAL,
+    CMD_CONFIRM_TIMEOUT,
     DOMAIN,
     IDLE_GAP_SEC,
     LOGGER,
@@ -294,7 +296,7 @@ class KocomGateway:
                 )
 
     def _schedule_bootstrap_queries(self) -> None:
-        """Query each known primary thermostat once per socket session."""
+        """Start one query task per socket session for every known primary thermostat."""
         generation = self._connection_generation
         if self._bootstrap_scheduled_generation == generation:
             return
@@ -328,18 +330,83 @@ class KocomGateway:
         keys: list[DeviceKey],
         connection_generation: int,
     ) -> None:
-        """Send one sequential directed status request for every known room."""
+        """Ask every known room for its state until its own live report arrives.
+
+        First round: every unanswered room's first query goes out before any
+        retry, then still-unanswered rooms are retried, up to SEND_RETRY_MAX
+        tries per room. After that, each still-unanswered room gets one try
+        every BOOTSTRAP_REQUERY_INTERVAL seconds while the session lasts.
+        """
         try:
-            for key in keys:
-                if (
-                    not self.conn._is_connected()
-                    or connection_generation != self._connection_generation
+            for attempt in range(1, SEND_RETRY_MAX + 1):
+                if attempt > 1:
+                    await asyncio.sleep(SEND_RETRY_GAP)
+                if not await self._async_bootstrap_round(
+                    keys, connection_generation, attempt
                 ):
                     return
-                await self._async_send_status_query(key, connection_generation)
+            while True:
+                await asyncio.sleep(BOOTSTRAP_REQUERY_INTERVAL)
+                if not await self._async_bootstrap_round(
+                    keys, connection_generation, None
+                ):
+                    return
         finally:
             if self._task_bootstrap_queries is asyncio.current_task():
                 self._task_bootstrap_queries = None
+
+    def _is_bootstrap_session(self, connection_generation: int) -> bool:
+        return (
+            self.conn._is_connected()
+            and connection_generation == self._connection_generation
+        )
+
+    async def _async_bootstrap_round(
+        self,
+        keys: list[DeviceKey],
+        connection_generation: int,
+        attempt: int | None,
+    ) -> bool:
+        """Try each unanswered room once; return whether any room is still unknown."""
+        pending = False
+        for key in keys:
+            if not self._is_bootstrap_session(connection_generation):
+                return False
+            if self.is_device_state_confirmed(key):
+                continue
+            if attempt is None:
+                LOGGER.debug("Re-asking still unknown thermostat %s", key)
+            elif attempt > 1:
+                LOGGER.debug(
+                    "Retrying status query for %s (attempt %d/%d)",
+                    key,
+                    attempt,
+                    SEND_RETRY_MAX,
+                )
+            if not await self._async_query_until_answered(key, connection_generation):
+                pending = True
+        return pending and self._is_bootstrap_session(connection_generation)
+
+    async def _async_query_until_answered(
+        self,
+        key: DeviceKey,
+        connection_generation: int,
+    ) -> bool:
+        """Send one status query, then wait for the room's own live report.
+
+        The wait happens here, after the sender has settled the query item, so
+        the shared sender queue is never held by it.
+        """
+        # Register before queueing: a room can answer in the same turn as the send.
+        waiter = self._register_confirmation(key, lambda _dev: True)
+        try:
+            if await self._async_send_status_query(key, connection_generation):
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await self._wait_for_confirmation(waiter, CMD_CONFIRM_TIMEOUT)
+        finally:
+            if waiter in self._pendings:
+                self._pendings.remove(waiter)
+        return self.is_device_state_confirmed(key)
 
     def _cancel_bootstrap_queries_soon(self) -> None:
         task = self._task_bootstrap_queries
@@ -504,6 +571,7 @@ class KocomGateway:
             not item.future.done()
             and self.conn._is_connected()
             and item.connection_generation == self._connection_generation
+            and not self.is_device_state_confirmed(item.key)
         )
 
     async def _sender_loop(self) -> None:
