@@ -7,7 +7,9 @@ The development type checker resolves the real, locked Home Assistant dependency
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
+import itertools
 import json
 import sys
 import types
@@ -779,6 +781,17 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         connection = self.gateway.conn
         assert isinstance(connection, _FakeConnection)
         self.connection: _FakeConnection = connection
+        # kw-boot-1: the bootstrap now waits for each room's live report and
+        # re-asks unanswered rooms; patched delays keep these tests fast and
+        # the hour-long re-ask interval keeps them to the first round.
+        for name, value in (
+            ("CMD_CONFIRM_TIMEOUT", 0.001),
+            ("SEND_RETRY_GAP", 0.001),
+            ("BOOTSTRAP_REQUERY_INTERVAL", 3600.0),
+        ):
+            patcher = patch.object(gateway_module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     async def asyncTearDown(self):
         if self.gateway._task_sender:
@@ -799,12 +812,31 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def _wait_for_bootstrap(self) -> None:
-        for _ in range(20):
-            task = self.gateway._task_bootstrap_queries
-            if task is None:
+        # kw-boot-1: answer waits make the task span real (patched) delays.
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
+            if self.gateway._task_bootstrap_queries is None:
                 return
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.001)
         self.fail("bootstrap query task did not finish")
+
+    async def _wait_for_sent(self, count: int) -> None:
+        """Wait until the fake transport has sent at least ``count`` frames."""
+        # kw-boot-1: unanswered rooms keep their task alive in the re-ask
+        # interval, so tests wait for the first round's frames instead.
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while asyncio.get_running_loop().time() < deadline:
+            if len(self.connection.sent) >= count:
+                return
+            await asyncio.sleep(0.001)
+        self.fail(f"expected {count} frames, sent {len(self.connection.sent)}")
+
+    async def _settle(self) -> None:
+        """Give a running bootstrap round time for any further frame."""
+        await asyncio.sleep(0.05)
+
+    def _live_report(self, room: int, target: int = 21) -> None:
+        self.gateway.controller._dispatch_packet(_thermostat_frame(target, 20, room=room).raw)
 
     async def _restore_entity_entries(self, entries, last_states=None) -> None:
         self.gateway.entry = create_autospec(ConfigEntry, instance=True, entry_id="entry")
@@ -845,6 +877,115 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         finally:
             gateway_module.SEND_RETRY_MAX = old_retry
         self.assertEqual([], self.gateway._pendings)
+
+    async def test_equal_live_primary_thermostat_reports_publish_once(self):
+        first_packet = _thermostat_frame(21, 20).raw
+        self.gateway.controller.feed(first_packet)
+        key = self._thermostat_state(1).key
+        original = self.gateway.registry.get(key)
+        assert original is not None
+        unmatched = self.gateway._register_confirmation(
+            self._thermostat_state(2).key, lambda _dev: True
+        )
+        for marker in (1, 2):
+            raw = bytearray(first_packet)
+            raw[17] = marker
+            raw[18] = sum(raw[2:18]) % 256
+            packet = bytes(raw)
+            order = []
+            waiter = self.gateway._register_confirmation(
+                key, lambda dev, events=order: events.append(("pending", dev)) is None
+            )
+            with (
+                patch.object(gateway_module, "async_dispatcher_send", side_effect=(
+                    lambda _hass, _signal, dev, events=order: events.append(("publish", dev))
+                )) as publish,
+                patch.object(self.gateway, "on_device_state", wraps=self.gateway.on_device_state) as receive,
+            ):
+                self.gateway.controller.feed(packet)
+
+            incoming = next(
+                call.args[0] for call in receive.call_args_list if call.args[0].key == key
+            )
+            self.assertIsNot(original, incoming)
+            self.assertEqual(original, incoming)
+            self.assertEqual(packet, incoming._packet)
+            publish.assert_called_once_with(
+                self.gateway.hass, self.gateway.async_signal_device_updated(key.unique_id), incoming
+            )
+            self.assertIs(incoming, publish.call_args.args[-1])
+            self.assertEqual([("publish", incoming), ("pending", incoming)], order)
+            self.assertIs(incoming, waiter.future.result())
+            self.assertFalse(unmatched.future.done())
+        self.assertEqual([], self.connection.sent)
+        self.assertTrue(self.gateway._tx_queue.empty())
+        self.assertIsNone(self.gateway._task_bootstrap_queries)
+        self.gateway._resolve_pending(False)
+
+    async def test_non_live_or_other_device_reports_do_not_refresh(self):
+        packet = _thermostat_frame(21, 20).raw
+        self.gateway.controller.feed(packet)
+        key = self._thermostat_state(1).key
+        with (
+            patch.object(gateway_module, "async_dispatcher_send") as publish,
+            patch.object(self.gateway, "_notify_pendings") as notify,
+        ):
+            self.gateway._restore_mode = True
+            self.gateway.controller.feed(packet)
+            self.gateway._restore_mode = False
+            self.connection.connected = False
+            self.gateway.controller.feed(packet)
+            self.connection.connected = True
+            self.gateway.controller.feed(_thermostat_frame(21, 20, packet_type=0x0D, mirrored=True).raw)
+            self.gateway.controller.feed(_thermostat_frame(21, 20, command=0x3A).raw)
+            corrupt = bytearray(packet)
+            corrupt[18] ^= 1
+            self.gateway.controller.feed(bytes(corrupt))
+            corrupt = bytearray(packet)
+            corrupt[-1] = 0
+            self.gateway.controller.feed(bytes(corrupt))
+            publish.assert_not_called()
+            notify.assert_not_called()
+
+        other_packet = _thermostat_frame(21, 20, room=2).raw
+        self.gateway.controller.feed(other_packet)
+        with patch.object(gateway_module, "async_dispatcher_send") as publish:
+            self.gateway.controller.feed(_thermostat_frame(22, 20, room=2).raw)
+            publish.assert_called_once()
+            other = publish.call_args.args[-1]
+            self.assertEqual(self._thermostat_state(2).key, other.key)
+            self.assertNotEqual(key, other.key)
+            self.assertEqual(
+                self.gateway.async_signal_device_updated(other.key.unique_id),
+                publish.call_args.args[1],
+            )
+
+        excluded = [
+            self._state(True),
+            DeviceState(DeviceKey(DeviceType.AIRCONDITIONER, 1, 0, SubType.NONE), Platform.CLIMATE, {}, {}),
+            DeviceState(key, Platform.SENSOR, {}, 20),
+            *(
+                DeviceState(DeviceKey(DeviceType.THERMOSTAT, 3, 0, subtype), platform, {}, 20)
+                for subtype, platform in (
+                    (SubType.HOTTEMP, Platform.SENSOR),
+                    (SubType.HEATTEMP, Platform.SENSOR),
+                    (SubType.ERRCODE, Platform.BINARY_SENSOR),
+                )
+            ),
+        ]
+        for dev in excluded:
+            with self.subTest(key=dev.key, platform=dev.platform):
+                self.gateway.on_device_state(dev)
+                incoming = DeviceState(dev.key, dev.platform, dict(dev.attribute), dev.state)
+                with (
+                    patch.object(gateway_module, "async_dispatcher_send") as publish,
+                    patch.object(self.gateway, "_notify_pendings") as notify,
+                ):
+                    self.gateway.on_device_state(incoming)
+                    publish.assert_not_called()
+                    notify.assert_called_once_with(incoming)
+        self.assertEqual([], self.connection.sent)
+        self.assertTrue(self.gateway._tx_queue.empty())
 
     async def test_restored_state_is_commandable_but_unconfirmed_until_live_packet(self):
         state = self._state(True)
@@ -907,24 +1048,28 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
 
         self.gateway._sync_connection_availability()
-        await self._wait_for_bootstrap()
+        # kw-boot-1: nothing answers, so the first round sends every room's
+        # first query before any retry, SEND_RETRY_MAX (3) rounds in all.
+        await self._wait_for_sent(9)
+        await self._settle()
         self.assertEqual(
             [bytes.fromhex("aa5530bc00360001003a00000000000000005d0d0d"),
              bytes.fromhex("aa5530bc00360101003a00000000000000005e0d0d"),
-             bytes.fromhex("aa5530bc00360201003a00000000000000005f0d0d")],
+             bytes.fromhex("aa5530bc00360201003a00000000000000005f0d0d")] * 3,
             self.connection.sent,
         )
 
         self.gateway._sync_connection_availability()
         await asyncio.sleep(0)
-        self.assertEqual(3, len(self.connection.sent))
+        self.assertEqual(9, len(self.connection.sent))
 
         self.connection.connected = False
         self.gateway._sync_connection_availability()
         self.connection.connected = True
         self.gateway._sync_connection_availability()
-        await self._wait_for_bootstrap()
-        self.assertEqual(6, len(self.connection.sent))
+        await self._wait_for_sent(18)
+        await self._settle()
+        self.assertEqual(18, len(self.connection.sent))
 
     async def test_registry_only_climates_seed_queries_without_placeholder_state(self):
         oversized_room = types.SimpleNamespace(
@@ -982,8 +1127,10 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
 
         self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
         self.gateway._sync_connection_availability()
-        await self._wait_for_bootstrap()
-        self.assertEqual([0, 1, 3], [packet[6] for packet in self.connection.sent])
+        # kw-boot-1: no room answers, so each gets SEND_RETRY_MAX first-round tries.
+        await self._wait_for_sent(9)
+        await self._settle()
+        self.assertEqual([0, 1, 3] * 3, [packet[6] for packet in self.connection.sent])
 
         living_key = DeviceKey(DeviceType.THERMOSTAT, 0, 0, SubType.NONE)
         first_key = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
@@ -1025,21 +1172,189 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.gateway.is_device_state_confirmed(key))
         self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
         self.gateway._sync_connection_availability()
-        await self._wait_for_bootstrap()
-        self.assertEqual([room], [packet[6] for packet in self.connection.sent])
+        # kw-boot-1: the unanswered room gets SEND_RETRY_MAX first-round tries.
+        await self._wait_for_sent(3)
+        await self._settle()
+        self.assertEqual([room] * 3, [packet[6] for packet in self.connection.sent])
 
-    async def test_bootstrap_query_does_not_retry_after_no_response(self):
-        state = self._thermostat_state(1)
+    def _restore_thermostats(self, *rooms: int) -> list[DeviceState]:
+        states = [self._thermostat_state(room) for room in rooms]
         self.gateway._restore_mode = True
-        self.gateway.on_device_state(state)
+        for state in states:
+            self.gateway.on_device_state(state)
         self.gateway._restore_mode = False
+        return states
+
+    async def test_bootstrap_query_retries_and_reasks_unanswered_room(self):
+        (state,) = self._restore_thermostats(1)
+        interval = 0.05
+        sent_at: list[float] = []
+        loop = asyncio.get_running_loop()
+        self.connection.on_send = lambda _packet: sent_at.append(loop.time())
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+
+        with (
+            patch.object(gateway_module, "BOOTSTRAP_REQUERY_INTERVAL", interval),
+            self.assertNoLogs("custom_components.kocom_wallpad", level="WARNING"),
+        ):
+            self.gateway._sync_connection_availability()
+            generation = self.gateway._connection_generation
+            await self._wait_for_sent(3)
+            self.assertEqual(3, len(self.connection.sent))
+            await self._wait_for_sent(4)
+            await self._wait_for_sent(5)
+            self.assertEqual(5, len(self.connection.sent))
+            self.assertEqual(generation, self.gateway._connection_generation)
+
+        self.assertTrue(all(packet[9] == 0x3A and packet[6] == 1 for packet in self.connection.sent))
+        gaps = [later - earlier for earlier, later in itertools.pairwise(sent_at)]
+        self.assertTrue(all(gap < interval for gap in gaps[:2]), gaps)
+        self.assertTrue(all(gap >= interval * 0.9 for gap in gaps[2:]), gaps)
+        self.assertFalse(self.gateway.is_device_state_confirmed(state.key))
+        self.assertFalse(self.gateway.is_device_available(state.key))
+        task = self.gateway._task_bootstrap_queries
+        self.assertIsNotNone(task)
+
+        # A new connection generation ends the re-asking with no further send.
+        with patch.object(gateway_module, "BOOTSTRAP_REQUERY_INTERVAL", interval):
+            self.gateway._connection_generation += 1
+            sent = len(self.connection.sent)
+            await asyncio.sleep(interval * 3)
+        self.assertEqual(sent, len(self.connection.sent))
+        assert task is not None
+        self.assertTrue(task.done())
+        self.assertFalse(self.gateway.is_device_state_confirmed(state.key))
+
+    async def test_bootstrap_room_answering_first_query_gets_one_frame(self):
+        (state,) = self._restore_thermostats(1)
+        self.connection.on_send = lambda packet: self._live_report(packet[6])
         self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
 
         self.gateway._sync_connection_availability()
         await self._wait_for_bootstrap()
 
         self.assertEqual(1, len(self.connection.sent))
-        self.assertFalse(self.gateway.is_device_state_confirmed(state.key))
+        self.assertTrue(self.gateway.is_device_available(state.key))
+
+    async def test_bootstrap_report_between_tries_stops_only_that_room(self):
+        first, second = self._restore_thermostats(1, 2)
+
+        def on_send(packet: bytes) -> None:
+            # Room 1 reports on its own between its first and second try.
+            if packet[6] == 2 and len(self.connection.sent) == 2:
+                self._live_report(1)
+
+        self.connection.on_send = on_send
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+
+        self.gateway._sync_connection_availability()
+        await self._wait_for_sent(4)
+        await self._settle()
+
+        self.assertEqual([1, 2, 2, 2], [packet[6] for packet in self.connection.sent])
+        self.assertTrue(self.gateway.is_device_available(first.key))
+        self.assertFalse(self.gateway.is_device_state_confirmed(second.key))
+        self.assertIsNotNone(self.gateway._task_bootstrap_queries)
+
+    async def test_bootstrap_report_between_rounds_ends_reasking(self):
+        (state,) = self._restore_thermostats(1)
+        interval = 0.05
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+
+        with patch.object(gateway_module, "BOOTSTRAP_REQUERY_INTERVAL", interval):
+            self.gateway._sync_connection_availability()
+            await self._wait_for_sent(3)
+            await asyncio.sleep(0.01)
+            self._live_report(1)
+            await self._wait_for_bootstrap()
+            await asyncio.sleep(interval * 3)
+
+        self.assertEqual(3, len(self.connection.sent))
+        self.assertTrue(self.gateway.is_device_available(state.key))
+
+    async def test_bootstrap_report_while_query_waits_skips_the_send(self):
+        (state,) = self._restore_thermostats(1)
+        self.connection.idle = False
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+
+        self.gateway._sync_connection_availability()
+        for _ in range(20):
+            if self.gateway._active_item is not None:
+                break
+            await asyncio.sleep(0)
+        self.assertIsNotNone(self.gateway._active_item)
+        self._live_report(1)
+        self.connection.idle = True
+        await self._wait_for_bootstrap()
+
+        self.assertEqual([], self.connection.sent)
+        self.assertTrue(self.gateway.is_device_available(state.key))
+
+    async def test_thermostat_command_is_not_held_by_bootstrap_answer_wait(self):
+        silent, commanded = self._restore_thermostats(1, 2)
+        confirm_wait = 0.5
+        sent_at: list[float] = []
+        loop = asyncio.get_running_loop()
+
+        def on_send(packet: bytes) -> None:
+            sent_at.append(loop.time())
+            if packet[9] != 0x3A and packet[6] == 2:
+                self._live_report(2, target=packet[12])
+
+        self.connection.on_send = on_send
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+
+        with patch.object(gateway_module, "CMD_CONFIRM_TIMEOUT", confirm_wait):
+            self.gateway._sync_connection_availability()
+            await self._wait_for_sent(1)
+            self.assertEqual((1, 0x3A), (self.connection.sent[0][6], self.connection.sent[0][9]))
+            self.assertTrue(await asyncio.wait_for(
+                self.gateway.async_send_action(
+                    commanded.key, "set_temperature", target_temp=23
+                ),
+                timeout=confirm_wait / 2,
+            ))
+            # The room-1 answer wait is still running when the command went out.
+            self.assertFalse(self.gateway._task_bootstrap_queries is None)
+            self.assertEqual(2, len(self.connection.sent))
+            self.assertLess(sent_at[1] - sent_at[0], confirm_wait)
+            self.assertNotEqual(0x3A, self.connection.sent[1][9])
+
+            # Room 2 reported through the command answer, so it is never queried.
+            await self._wait_for_sent(4)
+            await self._settle()
+        self.assertEqual([1, 2, 1, 1], [packet[6] for packet in self.connection.sent])
+        self.assertTrue(self.gateway.is_device_available(commanded.key))
+        self.assertFalse(self.gateway.is_device_state_confirmed(silent.key))
+
+    async def test_disconnect_and_stop_cancel_reasking(self):
+        for end in ("disconnect", "stop"):
+            with self.subTest(end=end):
+                self.connection.sent.clear()
+                self.connection.connected = True
+                self.gateway._restore_mode = True
+                self.gateway.on_device_state(self._thermostat_state(1))
+                self.gateway._restore_mode = False
+                self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+                with patch.object(gateway_module, "BOOTSTRAP_REQUERY_INTERVAL", 0.05):
+                    self.gateway._sync_connection_availability()
+                    await self._wait_for_sent(3)
+                    task = self.gateway._task_bootstrap_queries
+                    assert task is not None
+                    if end == "disconnect":
+                        self.connection.connected = False
+                        self.gateway._sync_connection_availability()
+                    else:
+                        await self.gateway.async_stop()
+                    sent = len(self.connection.sent)
+                    await asyncio.sleep(0.2)
+                self.assertEqual(sent, len(self.connection.sent))
+                self.assertTrue(task.cancelled())
+                if end == "disconnect":
+                    self.gateway._task_sender.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self.gateway._task_sender
+                    self.gateway._task_sender = None
 
     async def test_eof_reconnect_advances_generation_and_queries_once(self):
         state = self._thermostat_state(1)
@@ -1048,9 +1363,11 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.gateway._restore_mode = False
         self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
         self.gateway._sync_connection_availability()
-        await self._wait_for_bootstrap()
+        # kw-boot-1: the unanswered room gets SEND_RETRY_MAX tries per session.
+        await self._wait_for_sent(3)
+        await self._settle()
         initial_generation = self.gateway._connection_generation
-        self.assertEqual(1, len(self.connection.sent))
+        self.assertEqual(3, len(self.connection.sent))
 
         received_eof = False
 
@@ -1070,16 +1387,18 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.connection.open = reopen
         self.gateway._task_reader = asyncio.create_task(self.gateway._read_loop())
 
-        for _ in range(100):
+        # kw-boot-1: the new session's round sends three more frames.
+        for _ in range(1000):
             if (
                 self.gateway._connection_generation == initial_generation + 2
-                and len(self.connection.sent) == 2
+                and len(self.connection.sent) == 6
             ):
                 break
             await asyncio.sleep(0.001)
+        await self._settle()
 
         self.assertEqual(initial_generation + 2, self.gateway._connection_generation)
-        self.assertEqual(2, len(self.connection.sent))
+        self.assertEqual(6, len(self.connection.sent))
 
     async def test_stop_cleans_active_status_query_queue_accounting(self):
         state = self._thermostat_state(1)
@@ -1130,6 +1449,8 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         assert replacement is not None
         self.assertNotEqual(old_generation, self.gateway._connection_generation)
 
+        # kw-boot-1: the room answers its new-session query, ending the re-asking.
+        self.connection.on_send = lambda packet: self._live_report(packet[6])
         self.connection.idle = True
         await asyncio.wait_for(asyncio.shield(replacement), timeout=0.2)
         self.assertIsNone(self.gateway._task_bootstrap_queries)
@@ -1223,9 +1544,11 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
 
         self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
         self.gateway._sync_connection_availability()
-        await self._wait_for_bootstrap()
-        self.assertEqual(1, len(self.connection.sent))
-        self.assertEqual(room, self.connection.sent[0][6])
+        # kw-boot-1: the unanswered room gets SEND_RETRY_MAX first-round tries.
+        await self._wait_for_sent(3)
+        await self._settle()
+        self.assertEqual(3, len(self.connection.sent))
+        self.assertEqual([room] * 3, [packet[6] for packet in self.connection.sent])
 
         self.gateway.controller._dispatch_packet(
             _thermostat_frame(22, 20, room=room).raw

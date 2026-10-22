@@ -29,6 +29,7 @@ IDLE_GAP_SEC = 0.20   # 보내기 전 라인 유휴로 보고 싶은 최소 간�
 SEND_RETRY_MAX = 3
 SEND_RETRY_GAP = 0.15
 CMD_CONFIRM_TIMEOUT = 1.0  # 보낸 뒤 상태 확인을 기다리는 최대 시간
+BOOTSTRAP_REQUERY_INTERVAL = 60.0  # Seconds between re-asks of a thermostat still unknown in a session
 
 class DeviceType(IntEnum):
     """Device types."""

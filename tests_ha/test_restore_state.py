@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import restore_state
 from pytest_homeassistant_custom_component.common import (
@@ -16,6 +16,156 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.kocom_wallpad.const import DOMAIN, DeviceType, SubType
 from custom_components.kocom_wallpad.gateway import KocomGateway
 from custom_components.kocom_wallpad.models import DeviceKey
+from custom_components.kocom_wallpad.transport import AsyncConnection
+
+
+@pytest.fixture
+async def live_thermostat(hass: HomeAssistant):
+    """Set up the real climate platform from one received report, without I/O."""
+    entry = MockConfigEntry(domain=DOMAIN, data={"host": "wallpad.invalid", "port": 8899})
+    entry.add_to_hass(hass)
+    packet = bytes.fromhex("aa5530bc00010036010010001500140000005d0d0d")
+
+    async def start(gateway: KocomGateway) -> None:
+        gateway._sync_connection_availability()
+        gateway.controller.feed(packet)
+
+    with (
+        patch.object(KocomGateway, "async_start", start),
+        patch.object(KocomGateway, "async_stop", new=AsyncMock()),
+        patch.object(KocomGateway, "async_get_entity_registry", new=AsyncMock()),
+        patch.object(AsyncConnection, "_is_connected", return_value=True) as connected,
+        patch.object(AsyncConnection, "open", new=AsyncMock()) as open_connection,
+        patch.object(AsyncConnection, "send", new=AsyncMock()) as send_packet,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        gateway = hass.data[DOMAIN][entry.entry_id]
+        key = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
+        entity_id = er.async_get(hass).async_get_entity_id(
+            Platform.CLIMATE, DOMAIN, f"{key.unique_id}:wallpad.invalid"
+        )
+        assert entity_id is not None
+        try:
+            yield gateway, entity_id, packet, connected
+        finally:
+            assert await hass.config_entries.async_unload(entry.entry_id)
+            await hass.async_block_till_done()
+            open_connection.assert_not_awaited()
+            send_packet.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_equal_live_thermostat_reports_refresh_ha_receipt_only(
+    hass: HomeAssistant, live_thermostat, freezer
+) -> None:
+    gateway, entity_id, packet, _connected = live_thermostat
+    before = hass.states.get(entity_id)
+    assert before is not None and before.state == "heat"
+    assert before.attributes["physical_state_confirmed"] is True
+    controlled_state = before.state, dict(before.attributes)
+    last_changed, last_updated = before.last_changed, before.last_updated
+    previous_receipt = before.last_reported
+    reports, changes = [], []
+
+    @callback
+    def matches(data):
+        return data["entity_id"] == entity_id
+
+    @callback
+    def reported(event):
+        reports.append(event)
+
+    @callback
+    def changed(event):
+        changes.append(event)
+
+    remove_reported = hass.bus.async_listen("state_reported", reported, matches)
+    remove_changed = hass.bus.async_listen("state_changed", changed, matches)
+    try:
+        for count in (1, 2):
+            freezer.tick(60)
+            gateway.controller.feed(packet)
+            await hass.async_block_till_done()
+            after = hass.states.get(entity_id)
+            assert after is not None
+            assert (after.state, dict(after.attributes)) == controlled_state
+            assert after.last_changed == last_changed
+            assert after.last_updated == last_updated
+            assert after.last_reported > previous_receipt
+            assert len(reports) == count
+            assert reports[-1].data["old_last_reported"] == previous_receipt
+            assert reports[-1].data["last_reported"] == after.last_reported
+            previous_receipt = after.last_reported
+            assert changes == []
+        freezer.tick(60)
+        await hass.async_block_till_done()
+        idle = hass.states.get(entity_id)
+        assert idle is not None and idle.last_reported == previous_receipt
+        assert len(reports) == 2
+        assert gateway._tx_queue.empty()
+        assert gateway._task_bootstrap_queries is None
+    finally:
+        remove_reported()
+        remove_changed()
+
+
+@pytest.mark.asyncio
+async def test_non_live_thermostat_reports_do_not_refresh_confirmed_receipt(
+    hass: HomeAssistant, live_thermostat, freezer
+) -> None:
+    gateway, entity_id, packet, connected = live_thermostat
+    confirmed = hass.states.get(entity_id)
+    assert confirmed is not None and confirmed.attributes["physical_state_confirmed"] is True
+    previous_receipt = confirmed.last_reported
+    reports = []
+
+    @callback
+    def matches(data):
+        return data["entity_id"] == entity_id
+
+    @callback
+    def reported(event):
+        reports.append(event)
+
+    remove_reported = hass.bus.async_listen("state_reported", reported, matches)
+    try:
+        freezer.tick(60)
+        gateway._restore_mode = True
+        try:
+            gateway.controller.feed(packet)
+        finally:
+            gateway._restore_mode = False
+        mirror = bytearray(packet)
+        mirror[3] = 0xDC
+        mirror[5:9] = bytes.fromhex("36010100")
+        mirror[18] = sum(mirror[2:18]) % 256
+        gateway.controller.feed(bytes(mirror))
+        corrupt = bytearray(packet)
+        corrupt[18] ^= 1
+        gateway.controller.feed(bytes(corrupt))
+        await hass.async_block_till_done()
+        assert confirmed.last_reported == previous_receipt
+        assert reports == []
+
+        connected.return_value = False
+        gateway._sync_connection_availability()
+        await hass.async_block_till_done()
+        disconnected = hass.states.get(entity_id)
+        assert disconnected is not None and disconnected.state == "unavailable"
+        assert "physical_state_confirmed" not in disconnected.attributes
+        disconnected_receipt = disconnected.last_reported
+        freezer.tick(60)
+        gateway.controller.feed(packet)
+        await hass.async_block_till_done()
+        assert disconnected.last_reported == disconnected_receipt
+        assert reports == []
+        key = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
+        assert not gateway.is_device_state_confirmed(key)
+        assert gateway._tx_queue.empty()
+        assert gateway._task_bootstrap_queries is None
+    finally:
+        remove_reported()
 
 
 @pytest.mark.asyncio

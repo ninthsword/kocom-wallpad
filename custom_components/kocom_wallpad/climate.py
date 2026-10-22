@@ -52,6 +52,7 @@ async def async_setup_entry(
 class KocomClimate(KocomBaseEntity, ClimateEntity):
     """Representation of a Kocom climate."""
     
+    _attr_should_poll = False
     _enable_turn_on_off_backwards_compatibility = False
 
     _attr_min_temp = 5
