@@ -81,6 +81,7 @@ class _DeviceStateMetadata:
 
     _packet: bytes
     _is_register: bool
+    _change_label: dict[str, Any]
 
 
 @dataclass

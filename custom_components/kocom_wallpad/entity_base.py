@@ -109,11 +109,24 @@ class KocomBaseEntity(RestoreEntity):
     def available(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self.gateway.is_device_available(self._device.key)
 
-    async def _async_send_or_raise(self, description: str, action: str, **args: Any) -> None:
+    async def _async_send_or_raise(
+        self,
+        description: str,
+        action: str,
+        *,
+        context: object | None = None,
+        **args: Any,
+    ) -> None:
         """Send an action and surface transport/confirmation failures to HA."""
         if not self.available:
             raise HomeAssistantError("Kocom wallpad is unavailable")
-        if not await self.gateway.async_send_action(self._device.key, action, **args):
+        if context is None:
+            sent = await self.gateway.async_send_action(self._device.key, action, **args)
+        else:
+            sent = await self.gateway.async_send_action(
+                self._device.key, action, context=context, **args
+            )
+        if not sent:
             raise HomeAssistantError(f"Kocom wallpad could not {description}")
 
     @property

@@ -39,6 +39,7 @@ class _CmdItem:
     kwargs: dict
     connection_generation: int | None = None
     future: asyncio.Future[bool] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
+    context: object | None = None
 
 
 class _PendingWaiter:
@@ -193,8 +194,15 @@ class KocomGateway:
             LOGGER.debug("Read loop cancelled")
             raise
 
-    async def async_send_action(self, key: DeviceKey, action: str, **kwargs) -> bool:
-        item = _CmdItem(key=key, action=action, kwargs=kwargs)
+    async def async_send_action(
+        self,
+        key: DeviceKey,
+        action: str,
+        *,
+        context: object | None = None,
+        **kwargs,
+    ) -> bool:
+        item = _CmdItem(key=key, action=action, kwargs=kwargs, context=context)
         return await self._async_queue_item(item)
 
     async def _async_send_status_query(
@@ -279,6 +287,7 @@ class KocomGateway:
         if connected == self._connection_available:
             return
         self._connection_generation += 1
+        self.controller.clear_change_record()
         if self._connection_available and not connected:
             # A new socket session must receive a fresh physical report before
             # any restored or previously-live entity is considered available.
@@ -607,6 +616,7 @@ class KocomGateway:
                                     if asyncio.get_running_loop().time() - t0 > 1.0:
                                         break
                                 if self._is_current_status_query(item):
+                                    self.controller.note_transmitted(packet, item.context)
                                     await self.conn.send(packet)
                                     self._last_tx_monotonic = asyncio.get_running_loop().time()
                                     success = True
@@ -637,6 +647,9 @@ class KocomGateway:
                         # the same event-loop turn as drain().
                         waiter = self._register_confirmation(item.key, expect_predicate)
 
+                        # Note the transmission first: a reply can be read in the
+                        # same turn; the note stays if the send then fails.
+                        self.controller.note_transmitted(packet, item.context)
                         try:
                             await self.conn.send(packet)
                         except (OSError, RuntimeError, TimeoutError) as err:

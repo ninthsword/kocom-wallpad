@@ -59,6 +59,14 @@ def _install_homeassistant_shims() -> None:
     _set_attributes(core, HomeAssistant=object)
     _set_attributes(core, Event=object)
     _set_attributes(core, callback=lambda function: function)
+
+    class _Context:
+        def __init__(self, user_id=None, parent_id=None, id=None):
+            self.user_id = user_id
+            self.parent_id = parent_id
+            self.id = id
+
+    _set_attributes(core, Context=_Context)
     config_entries = _module("homeassistant.config_entries")
     _set_attributes(config_entries, ConfigEntry=object)
 
@@ -1881,6 +1889,277 @@ class SetupCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["parent"], events)
         self.assertEqual({}, hass.data)
+
+
+# Frames observed on 2026-10-23 (room 03; 0100 is the wallpad and the
+# integration's own source address), byte for byte.
+_OBSERVED = {
+    "command_21": "aa5530bc00360301000011001500000000004c0d0d",
+    "ack_21": "aa5530dc00010036030011001500000000006c0d0d",
+    "status_21": "aa5530bc0001003603001100150018000000640d0d",
+    "wallpad_ack_21": "aa5530dc0036030100001100150018000000840d0d",
+    "command_20": "aa5530bc00360301000011001400000000004b0d0d",
+    "ack_20": "aa5530dc00010036030011001400000000006b0d0d",
+    "status_20": "aa5530bc0001003603001100140018000000630d0d",
+    "wallpad_ack_20": "aa5530dc0036030100001100140018000000830d0d",
+    "query_00": "aa5530bc00360001003a00000000000000005d0d0d",
+    "query_ack_00": "aa5530dc00010036003a00000000000000007d0d0d",
+    "status_00": "aa5530bc00010036000011001a001c0000006a0d0d",
+    "wallpad_ack_00": "aa5530dc00360001000011001a001c0000008a0d0d",
+    "query_03": "aa5530bc00360301003a0000000000000000600d0d",
+    "query_ack_03": "aa5530dc00010036033a0000000000000000800d0d",
+}
+
+
+def _frame(name: str) -> bytes:
+    return bytes.fromhex(_OBSERVED[name])
+
+
+_ROOM_3 = DeviceKey(DeviceType.THERMOSTAT, 3, 0, SubType.NONE)
+
+
+class _StateSink:
+    """A gateway stand-in with only on_device_state."""
+
+    def __init__(self) -> None:
+        self.states: list[DeviceState] = []
+
+    def on_device_state(self, state: DeviceState) -> None:
+        self.states.append(state)
+
+
+class _RestoringSink(_StateSink):
+    """A stand-in gateway that can switch restore mode."""
+
+    _restore_mode = True
+
+
+def _labels(states: list[DeviceState]) -> list[dict]:
+    return [
+        label
+        for state in states
+        if state.key == _ROOM_3
+        and (label := getattr(state, "_change_label", None)) is not None
+    ]
+
+
+class ChangeSourceControllerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sink = _StateSink()
+        self.controller = KocomController(self.sink)
+
+    def _feed(self, *names: str) -> None:
+        for name in names:
+            self.controller.feed(_frame(name))
+
+    def test_observed_frames_have_valid_checksums(self):
+        for name in _OBSERVED:
+            packet = _frame(name)
+            self.assertEqual(21, len(packet), name)
+            self.assertEqual(sum(packet[2:18]) % 256, packet[18], name)
+
+    def test_received_command_sequence_is_wallpad(self):
+        self._feed("status_20", "wallpad_ack_20")
+        self.assertEqual([], _labels(self.sink.states))
+        self._feed("command_21", "ack_21", "status_21", "wallpad_ack_21")
+        self._feed("command_20", "ack_20", "status_20", "wallpad_ack_20")
+        labels = _labels(self.sink.states)
+        self.assertEqual(
+            [
+                {"source": "wallpad", "changes": {"target_temperature": {"old": 20.0, "new": 21.0}}, "context": None},
+                {"source": "wallpad", "changes": {"target_temperature": {"old": 21.0, "new": 20.0}}, "context": None},
+            ],
+            [{k: v for k, v in label.items() if k != "sequence"} for label in labels],
+        )
+        self.assertLess(labels[0]["sequence"], labels[1]["sequence"])
+
+    def test_status_report_alone_is_device(self):
+        self._feed("status_20", "wallpad_ack_20", "status_21", "wallpad_ack_21")
+        labels = _labels(self.sink.states)
+        self.assertEqual(1, len(labels))
+        self.assertEqual("device", labels[0]["source"])
+        self.assertEqual({"target_temperature": {"old": 20.0, "new": 21.0}}, labels[0]["changes"])
+
+    def test_received_query_then_changed_report_is_unknown(self):
+        self._feed("status_21", "wallpad_ack_21")
+        self._feed("query_03", "query_ack_03", "status_20", "wallpad_ack_20")
+        labels = _labels(self.sink.states)
+        self.assertEqual(["unknown"], [label["source"] for label in labels])
+        self.assertEqual({"target_temperature": {"old": 21.0, "new": 20.0}}, labels[0]["changes"])
+
+    def test_received_query_then_unchanged_report_is_no_change(self):
+        self._feed("status_20", "wallpad_ack_20")
+        self._feed("query_00", "query_ack_00", "status_00", "wallpad_ack_00")
+        self._feed("query_03", "query_ack_03", "status_20", "wallpad_ack_20")
+        self.assertEqual([], _labels(self.sink.states))
+
+    def test_report_more_than_two_seconds_after_command_is_device(self):
+        clock = [100.0]
+        with patch("custom_components.kocom_wallpad.controller.time.monotonic", lambda: clock[0]):
+            self._feed("status_20")
+            self._feed("command_21", "ack_21")
+            clock[0] += 2.5
+            self._feed("status_21")
+            clock[0] += 10.0
+            self._feed("command_20", "ack_20")
+            clock[0] += 1.9
+            self._feed("status_20")
+        self.assertEqual(["device", "wallpad"], [label["source"] for label in _labels(self.sink.states)])
+
+    def test_current_temperature_only_is_no_change(self):
+        self._feed("status_20")
+        changed = bytearray(_frame("status_20"))
+        changed[14] = 0x19  # current temperature 25 instead of 24
+        changed[18] = sum(changed[2:18]) % 256
+        self.controller.feed(bytes(changed))
+        self.assertEqual(2, len([s for s in self.sink.states if s.key == _ROOM_3]))
+        self.assertEqual([], _labels(self.sink.states))
+
+    def test_first_live_report_after_setup_is_no_change(self):
+        self._feed("command_21", "ack_21", "status_21", "wallpad_ack_21")
+        self.assertEqual([], _labels(self.sink.states))
+
+    def test_restore_mode_report_and_mirror_are_no_change(self):
+        sink = _RestoringSink()
+        self.sink = sink
+        self.controller = KocomController(sink)
+        self._feed("status_20", "wallpad_ack_20")
+        restored = [s for s in sink.states if s.key == _ROOM_3]
+        self.assertEqual(2, len(restored))
+        sink._restore_mode = False
+        self._feed("status_21", "wallpad_ack_21")
+        self.assertEqual(3, len([s for s in sink.states if s.key == _ROOM_3]))
+        self.assertEqual([], _labels(sink.states))
+
+    def test_labelled_state_keeps_dataclass_contract(self):
+        self._feed("status_20", "status_21")
+        state = next(s for s in self.sink.states if getattr(s, "_change_label", None))
+        self.assertEqual(("key", "platform", "attribute", "state"), tuple(f.name for f in fields(state)))
+        self.assertNotIn("_change_label", asdict(state))
+
+    def test_received_command_and_query_frames_outside_loop_produce_nothing(self):
+        with self.assertRaises(RuntimeError):
+            asyncio.get_running_loop()
+        for name in ("command_21", "command_20", "query_00", "query_03"):
+            self._feed(name)
+        self.assertEqual([], self.sink.states)
+
+
+class ChangeSourceGatewayTests(unittest.IsolatedAsyncioTestCase):
+    """Real controller and gateway with the fake transport."""
+
+    async def asyncSetUp(self):
+        patcher = patch.object(gateway_module, "AsyncConnection", _FakeConnection)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.gateway = KocomGateway(
+            create_autospec(HomeAssistant, instance=True),
+            create_autospec(ConfigEntry, instance=True),
+            "test", 1,
+        )
+        connection = self.gateway.conn
+        assert isinstance(connection, _FakeConnection)
+        self.connection: _FakeConnection = connection
+
+    async def asyncTearDown(self):
+        if self.gateway._task_sender:
+            await self.gateway.async_stop()
+
+    async def _wait_for_sent(self, count: int) -> None:
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while len(self.connection.sent) < count:
+            if asyncio.get_running_loop().time() > deadline:
+                self.fail(f"expected {count} frames, sent {len(self.connection.sent)}")
+            await asyncio.sleep(0.001)
+
+    def _room_state(self) -> DeviceState | None:
+        return self.gateway.registry.get(_ROOM_3)
+
+    def _label(self) -> dict | None:
+        return getattr(self._room_state(), "_change_label", None)
+
+    def _start(self) -> None:
+        self.gateway._sync_connection_availability()
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+        self.gateway.controller.feed(_frame("status_20") + _frame("wallpad_ack_20"))
+        self.assertIsNone(self._label())
+
+    async def test_transmitted_command_sequence_is_integration(self):
+        self._start()
+        context = object()
+        task = asyncio.create_task(self.gateway.async_send_action(
+            _ROOM_3, "set_temperature", context=context, target_temp=21.0
+        ))
+        await self._wait_for_sent(1)
+        self.assertEqual([_frame("command_21")], self.connection.sent)
+        for name in ("ack_21", "status_21", "wallpad_ack_21"):
+            self.gateway.controller.feed(_frame(name))
+        self.assertTrue(await asyncio.wait_for(task, timeout=1.0))
+        label = self._label()
+        assert label is not None
+        self.assertEqual("integration", label["source"])
+        self.assertIs(context, label["context"])
+        self.assertEqual({"target_temperature": {"old": 20.0, "new": 21.0}}, label["changes"])
+
+    async def test_same_bytes_received_are_wallpad(self):
+        self._start()
+        for name in ("command_21", "ack_21", "status_21", "wallpad_ack_21"):
+            self.gateway.controller.feed(_frame(name))
+        label = self._label()
+        assert label is not None
+        self.assertEqual("wallpad", label["source"])
+        self.assertIsNone(label["context"])
+        self.assertEqual([], self.connection.sent)
+
+    async def test_report_fed_from_inside_send_is_integration(self):
+        self._start()
+        self.connection.on_send = lambda _packet: self.gateway.controller.feed(
+            _frame("ack_21") + _frame("status_21") + _frame("wallpad_ack_21")
+        )
+        self.assertTrue(await asyncio.wait_for(
+            self.gateway.async_send_action(_ROOM_3, "set_temperature", target_temp=21.0),
+            timeout=1.0,
+        ))
+        label = self._label()
+        assert label is not None
+        self.assertEqual("integration", label["source"])
+        self.assertIsNone(label["context"])
+
+    async def test_first_live_report_after_reconnection_is_no_change(self):
+        self._start()
+        self.gateway.controller.feed(_frame("command_21"))
+        self.connection.connected = False
+        self.gateway._sync_connection_availability()
+        self.connection.connected = True
+        sender = self.gateway._task_sender
+        assert sender is not None
+        sender.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sender
+        self.gateway._task_sender = None
+        self.gateway._sync_connection_availability()
+        self.gateway.controller.feed(_frame("status_21") + _frame("wallpad_ack_21"))
+        state = self._room_state()
+        assert state is not None and isinstance(state.state, dict)
+        self.assertEqual(21.0, state.state["target_temp"])
+        self.assertIsNone(self._label())
+
+    async def test_received_command_and_query_frames_leave_state_untouched(self):
+        self._start()
+        before = self._room_state()
+        live_keys = set(self.gateway._live_device_keys)
+        waiter = self.gateway._register_confirmation(_ROOM_3, lambda _dev: True)
+        other = DeviceKey(DeviceType.THERMOSTAT, 4, 0, SubType.NONE)
+        with patch.object(gateway_module, "async_dispatcher_send") as publish:
+            for name in ("command_21", "ack_21", "query_03", "query_ack_03", "query_00", "query_ack_00"):
+                self.gateway.controller.feed(_frame(name))
+        publish.assert_not_called()
+        self.assertFalse(waiter.future.done())
+        self.assertIs(before, self._room_state())
+        self.assertEqual(live_keys, self.gateway._live_device_keys)
+        self.assertIsNone(self.gateway.registry.get(other))
+        self.assertEqual([], self.connection.sent)
+        self.gateway._pendings.remove(waiter)
 
 
 if __name__ == "__main__":

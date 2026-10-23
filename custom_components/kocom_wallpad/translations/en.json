@@ -47,7 +47,21 @@
         },
         "climate": {
             "thermostat": {
-                "name": "Thermostat {id}"
+                "name": "Thermostat {id}",
+                "state_attributes": {
+                    "change_source": {
+                        "name": "Change source",
+                        "state": {
+                            "integration": "Integration",
+                            "wallpad": "Wallpad",
+                            "device": "Thermostat",
+                            "unknown": "Unknown"
+                        }
+                    },
+                    "change_time": {
+                        "name": "Change time"
+                    }
+                }
             },
             "airconditioner": {
                 "name": "Air Conditioner {id}"

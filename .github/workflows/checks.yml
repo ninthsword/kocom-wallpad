@@ -70,7 +70,7 @@ jobs:
       - name: Check compatibility types
         run: |
           devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.9/bin/python
-          devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.9/bin/python tests_ha/conftest.py tests_ha/test_setup_entities.py tests_ha/test_serial_dependency.py
+          devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.9/bin/python tests_ha/conftest.py tests_ha/test_setup_entities.py tests_ha/test_serial_dependency.py tests_ha/test_change_source.py
       - name: Run offline and real Home Assistant tests in separate processes
         run: |
           .venv-ha2026.9/bin/python -B -m unittest discover -s tests -v
@@ -137,7 +137,7 @@ jobs:
         run: |
           .venv-ha2026.10/bin/python -B -m pytest --collect-only -p no:cacheprovider --disable-socket --allow-unix-socket -o asyncio_mode=auto tests_ha
           devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python
-          devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python tests_ha/conftest.py tests_ha/test_setup_entities.py tests_ha/test_serial_dependency.py tests_ha/test_restore_state.py
+          devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python tests_ha/conftest.py tests_ha/test_setup_entities.py tests_ha/test_serial_dependency.py tests_ha/test_restore_state.py tests_ha/test_change_source.py
           .venv-ha2026.10/bin/python -B -m unittest discover -s tests -v
           .venv-ha2026.10/bin/python -B -m pytest -p no:cacheprovider --disable-socket --allow-unix-socket -o asyncio_mode=auto tests_ha
           .venv-ha2026.10/bin/ruff check --no-cache custom_components tests tests_ha

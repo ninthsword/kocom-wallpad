@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -18,6 +19,7 @@ from homeassistant.components.switch import SwitchDeviceClass
 from homeassistant.const import Platform, UnitOfTemperature
 
 from .const import (
+    CHANGE_SOURCE_WINDOW_SEC,
     CMD_CONFIRM_TIMEOUT,
     LOGGER,
     PACKET_LEN,
@@ -104,6 +106,83 @@ class KocomController:
         self.gateway = gateway
         self._rx_buf = bytearray()
         self._device_storage: dict[str, Any] = {}
+        # Change-source record per primary thermostat room, for the current
+        # connection only: previous live settings, the latest command frame
+        # (time, transmitted by the integration, its context) and the latest
+        # status query time.  It only labels changes; it never sets state.
+        self._thermo_settings: dict[int, tuple[Any, Any, float]] = {}
+        self._thermo_commands: dict[int, tuple[float, bool, object | None]] = {}
+        self._thermo_queries: dict[int, float] = {}
+        self._change_sequence = 0
+
+    @staticmethod
+    def _thermostat_request(frame: PacketFrame) -> tuple[int, int] | None:
+        """Return (room, command) of a thermostat command or status query frame."""
+        if (
+            frame.packet_type == 0x0B
+            and frame.dest[0] == 0x36
+            and 0x00 <= frame.dest[1] <= 0xFE
+            and frame.src == b"\x01\x00"
+            and frame.command in (0x00, 0x3A)
+        ):
+            return frame.dest[1], frame.command
+        return None
+
+    def _note_request(self, frame: PacketFrame, transmitted: bool, context: object | None) -> None:
+        request = self._thermostat_request(frame)
+        if request is None:
+            return
+        room, command = request
+        now = time.monotonic()
+        if command == 0x00:
+            self._thermo_commands[room] = (now, transmitted, context)
+        else:
+            self._thermo_queries[room] = now
+
+    def note_transmitted(self, packet: bytes, context: object | None = None) -> None:
+        """Note a frame the gateway is about to transmit, for change labels."""
+        if len(packet) == PACKET_LEN:
+            self._note_request(PacketFrame(packet), True, context)
+
+    def clear_change_record(self) -> None:
+        """Forget previous live settings and frame windows (new connection)."""
+        self._thermo_settings.clear()
+        self._thermo_commands.clear()
+        self._thermo_queries.clear()
+
+    def _change_label(self, room: int, settings: tuple[Any, Any, float]) -> dict[str, Any] | None:
+        previous = self._thermo_settings.get(room)
+        self._thermo_settings[room] = settings
+        if previous is None or previous == settings:
+            return None
+        now = time.monotonic()
+        context = None
+        command = self._thermo_commands.get(room)
+        query = self._thermo_queries.get(room)
+        if command is not None and now - command[0] <= CHANGE_SOURCE_WINDOW_SEC:
+            source = "integration" if command[1] else "wallpad"
+            if command[1]:
+                context = command[2]
+        elif query is not None and now - query <= CHANGE_SOURCE_WINDOW_SEC:
+            source = "unknown"
+        else:
+            source = "device"
+        changes: dict[str, dict[str, Any]] = {}
+        old_mode, old_preset, old_target = previous
+        new_mode, new_preset, new_target = settings
+        if old_target != new_target:
+            changes["target_temperature"] = {"old": old_target, "new": new_target}
+        if old_mode != new_mode:
+            changes["hvac_mode"] = {"old": str(old_mode), "new": str(new_mode)}
+        if old_preset != new_preset:
+            changes["preset_mode"] = {"old": str(old_preset), "new": str(new_preset)}
+        self._change_sequence += 1
+        return {
+            "sequence": self._change_sequence,
+            "source": source,
+            "changes": changes,
+            "context": context,
+        }
 
     @staticmethod
     def _checksum(buf: bytes) -> int:
@@ -225,6 +304,9 @@ class KocomController:
 
     def _handle_thermostat(self, frame: PacketFrame) -> list[DeviceState] | None:
         states: list[DeviceState] = []
+        # Received command and query frames only label a later change.
+        self._note_request(frame, False, None)
+        restore_mode = bool(getattr(self.gateway, "_restore_mode", False))
         is_live_status = (
             frame.packet_type == 0x0B
             and frame.dest == b"\x01\x00"
@@ -233,7 +315,7 @@ class KocomController:
             and frame.command == 0x00
         )
         is_restore_mirror = (
-            bool(getattr(self.gateway, "_restore_mode", False))
+            restore_mode
             and frame.packet_type == 0x0D
             and frame.dest[0] == 0x36
             and 0x00 <= frame.dest[1] <= 0xFE
@@ -275,6 +357,10 @@ class KocomController:
                 "current_temp": current_temp,
             }
             dev = DeviceState(key=key, platform=Platform.CLIMATE, attribute=attribute, state=state)
+            if is_live_status and not restore_mode:
+                label = self._change_label(frame.dev_room, (havc_mode, preset_mode, target_temp))
+                if label is not None:
+                    dev._change_label = label
             states.append(dev)
             
             key = DeviceKey(

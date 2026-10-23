@@ -52,6 +52,7 @@ Home Assistant 2026.8.0 이상이 필요하며, 이는 테스트된 개발 기�
 
 - **초기 장치 추가 시에는 최초 한번은 장치를 ON/OFF 하셔야 합니다.**
 - 난방: 월패드에 연결될 때마다 알려진 모든 온도조절기에 상태를 물어보고, 응답이 올 때까지 다시 묻습니다. 연결 직후에는 방마다 최대 3번, 그 뒤에는 아직 상태를 모르는 방에만 1분에 한 번 묻습니다. 이 상태 질의 때문에 난방 제어 명령이 늦어지지는 않으며, 방은 그 방의 상태 보고가 실제로 들어올 때까지 알 수 없음으로 표시됩니다.
+- 난방 변경 주체: 온도조절기 설정(희망온도, 난방 켜짐/꺼짐, 외출)이 바뀌면 누가 바꿨는지 표시합니다. **통합**은 이 통합구성요소가 보낸 명령이며 로그북에 그 명령을 부른 사람이나 자동화가 함께 표시됩니다. **월패드**는 월패드가 보낸 명령, **단말기**는 앞선 명령 없이 방 온도조절기가 변경을 보고한 경우, **알 수 없음**은 상태 질의의 응답에서만 변경이 보인 경우입니다. 결과는 난방 엔터티의 `변경 주체`와 `변경 시각` 속성과 변경마다 한 줄의 로그북 기록으로 남습니다. 온도조절기 보고 직전 2초 동안의 프레임으로 판단하며, 재시작, 다시 불러오기, 재연결 후에는 새로 시작하므로 Home Assistant가 연결되지 않은 동안의 변경은 표시되지 않습니다. 이 구분은 RS485 어댑터가 통합구성요소가 보낸 프레임을 되돌려 보내지 않는다고 가정합니다(TCP 브리지에서 확인). 되돌려 보내는 어댑터에서는 Home Assistant에서 보낸 변경이 월패드로 표시됩니다.
 - 엘리베이터의 경우 현관 스위치가 있는 경우 현관 스위치에서 호출하셔야 정상적으로 등록됩니다.
 - 기기 지원 및 기타 요청 사항은 [유지보수 이슈 트래커](https://github.com/ninthsword/kocom-wallpad/issues)를 이용해 주세요.
 
@@ -89,7 +90,7 @@ devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --python
 .venv/bin/python -B -m unittest discover -s tests -v
 ```
 
-Pyright는 14개 통합구성요소 모듈과 오프라인 회귀 테스트 모듈 전체를
+Pyright는 로그북 설명 모듈 `logbook.py`를 포함한 15개 통합구성요소 모듈과 오프라인 회귀 테스트 모듈 전체를
 실제 개발 의존성을 기준으로 검사합니다. Config-flow 테스트는 프로토콜 shim과 분리된
 새 서브프로세스에서 실제 Home Assistant로 실행됩니다. 나머지 테스트는 좁은 범위의 Home Assistant shim과 가짜
 트랜스포트를 사용해 네트워크나 실제 장치 접근 없이 패킷 바이트, 확인 응답, 재연결,
@@ -161,7 +162,7 @@ npm ci --prefix devtools/pyright --ignore-scripts --no-audit --no-fund
 .venv-ha2026.10/bin/python -B -m unittest discover -s devtools -p test_ha2026_10_typing.py -v
 .venv-ha2026.10/bin/python -B -m pytest --collect-only -p no:cacheprovider --disable-socket --allow-unix-socket -o asyncio_mode=auto tests_ha
 devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python
-devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python tests_ha/conftest.py tests_ha/test_setup_entities.py tests_ha/test_serial_dependency.py tests_ha/test_restore_state.py
+devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python tests_ha/conftest.py tests_ha/test_setup_entities.py tests_ha/test_serial_dependency.py tests_ha/test_restore_state.py tests_ha/test_change_source.py
 .venv-ha2026.10/bin/python -B -m unittest discover -s tests -v
 .venv-ha2026.10/bin/python -B -m pytest -p no:cacheprovider --disable-socket --allow-unix-socket -o asyncio_mode=auto tests_ha
 .venv-ha2026.10/bin/ruff check --no-cache custom_components tests tests_ha

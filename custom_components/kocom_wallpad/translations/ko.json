@@ -47,7 +47,21 @@
         },
         "climate": {
             "thermostat": {
-                "name": "난방 {id}"
+                "name": "난방 {id}",
+                "state_attributes": {
+                    "change_source": {
+                        "name": "변경 주체",
+                        "state": {
+                            "integration": "통합",
+                            "wallpad": "월패드",
+                            "device": "단말기",
+                            "unknown": "알 수 없음"
+                        }
+                    },
+                    "change_time": {
+                        "name": "변경 시각"
+                    }
+                }
             },
             "airconditioner": {
                 "name": "에어컨 {id}"
