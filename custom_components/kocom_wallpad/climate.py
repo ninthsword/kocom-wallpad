@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from typing import Any
+
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
     ClimateEntityFeature,
@@ -10,11 +13,11 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, Platform, UnitOfTemperature
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, EVENT_THERMOSTAT_CHANGED, DeviceType, SubType
 from .entity_base import KocomBaseEntity
 from .gateway import KocomGateway
 from .models import DeviceState
@@ -71,6 +74,51 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
             self._attr_supported_features |= ClimateEntityFeature.FAN_MODE
         if device.attribute.get("feature_preset", False):
             self._attr_supported_features |= ClimateEntityFeature.PRESET_MODE
+        key = device.key
+        self._is_primary_thermostat = (
+            key.device_type == DeviceType.THERMOSTAT
+            and key.sub_type == SubType.NONE
+            and key.device_index == 0
+            and 0x00 <= key.room_index <= 0xFE
+        )
+        self._change_sequence = 0
+        self._change_source: str | None = None
+        self._change_time: datetime | None = None
+
+    @callback
+    def update_from_state(self) -> None:
+        """Write state; record a newly labelled thermostat change once."""
+        label = getattr(self._device, "_change_label", None)
+        if (
+            not self._is_primary_thermostat
+            or label is None
+            or label["sequence"] <= self._change_sequence
+        ):
+            self.async_write_ha_state()
+            return
+        self._change_sequence = label["sequence"]
+        self._change_source = label["source"]
+        self._change_time = datetime.now(UTC)
+        context = label["context"]
+        if label["source"] != "integration" or not isinstance(context, Context):
+            context = Context()
+        self.async_set_context(context)
+        self.async_write_ha_state()
+        self.hass.bus.async_fire(
+            EVENT_THERMOSTAT_CHANGED,
+            {
+                "entity_id": self.entity_id,
+                "source": label["source"],
+                "changes": label["changes"],
+            },
+            context=context,
+        )
+
+    def _send_context(self) -> Context | None:
+        """Return the service call context sent with a primary thermostat command."""
+        if not self._is_primary_thermostat:
+            return None
+        return getattr(self, "_context", None)
 
     @property
     # HA declares a cached descriptor; retain dynamic property semantics.
@@ -80,13 +128,17 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
 
     @property
     # HA declares a cached descriptor; retain dynamic property semantics.
-    def extra_state_attributes(self) -> dict[str, bool]:  # pyright: ignore[reportIncompatibleVariableOverride]
-        """Expose whether state was physically confirmed in this connection."""
-        return {
+    def extra_state_attributes(self) -> dict[str, Any]:  # pyright: ignore[reportIncompatibleVariableOverride]
+        """Expose physical confirmation and the last labelled change."""
+        attributes: dict[str, Any] = {
             "physical_state_confirmed": self.gateway.is_device_state_confirmed(
                 self._device.key
             )
         }
+        if self._change_source is not None:
+            attributes["change_source"] = self._change_source
+            attributes["change_time"] = self._change_time
+        return attributes
 
     @property
     def _state_is_confirmed(self) -> bool:
@@ -180,7 +232,9 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
     
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         args = {"hvac_mode": hvac_mode}
-        await self._async_send_or_raise("set HVAC mode", "set_hvac", **args)
+        await self._async_send_or_raise(
+            "set HVAC mode", "set_hvac", context=self._send_context(), **args
+        )
         
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         args = {"fan_mode": fan_mode}
@@ -188,8 +242,12 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         args = {"preset_mode": preset_mode}
-        await self._async_send_or_raise("set preset mode", "set_preset", **args)
+        await self._async_send_or_raise(
+            "set preset mode", "set_preset", context=self._send_context(), **args
+        )
 
     async def async_set_temperature(self, **kwargs) -> None:
         args = {"target_temp": float(kwargs[ATTR_TEMPERATURE])}
-        await self._async_send_or_raise("set temperature", "set_temperature", **args)
+        await self._async_send_or_raise(
+            "set temperature", "set_temperature", context=self._send_context(), **args
+        )

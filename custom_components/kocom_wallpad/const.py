@@ -30,6 +30,8 @@ SEND_RETRY_MAX = 3
 SEND_RETRY_GAP = 0.15
 CMD_CONFIRM_TIMEOUT = 1.0  # 보낸 뒤 상태 확인을 기다리는 최대 시간
 BOOTSTRAP_REQUERY_INTERVAL = 60.0  # Seconds between re-asks of a thermostat still unknown in a session
+CHANGE_SOURCE_WINDOW_SEC = 2.0  # Frames this long before a thermostat report decide its change source
+EVENT_THERMOSTAT_CHANGED = f"{DOMAIN}_thermostat_changed"
 
 class DeviceType(IntEnum):
     """Device types."""
