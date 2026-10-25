@@ -40,6 +40,8 @@ class _CmdItem:
     connection_generation: int | None = None
     future: asyncio.Future[bool] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
     context: object | None = None
+    # Identity of the pending thermostat restore this item belongs to.
+    restore: int | None = None
 
 
 class _PendingWaiter:
@@ -217,6 +219,17 @@ class KocomGateway:
             connection_generation=connection_generation,
         )
         return await self._async_queue_item(item)
+
+    def queue_thermostat_restore(self, key: DeviceKey, target: float, restore: int) -> None:
+        """Queue one restore set_temperature without awaiting its result."""
+        item = _CmdItem(
+            key=key,
+            action="set_temperature",
+            kwargs={"target_temp": target},
+            connection_generation=self._connection_generation,
+            restore=restore,
+        )
+        self._tx_queue.put_nowait(item)
 
     async def _async_queue_item(self, item: _CmdItem) -> bool:
         await self._tx_queue.put(item)
@@ -583,6 +596,16 @@ class KocomGateway:
             and not self.is_device_state_confirmed(item.key)
         )
 
+    def _is_current_restore(self, item: _CmdItem) -> bool:
+        """Return whether a restore item may still be sent in this connection."""
+        return (
+            item.restore is not None
+            and self.conn._is_connected()
+            and item.connection_generation == self._connection_generation
+            and self.is_device_state_confirmed(item.key)
+            and self.controller.is_restore_pending(item.key.room_index, item.restore)
+        )
+
     async def _sender_loop(self) -> None:
         LOGGER.debug("Starting sender loop")
         try:
@@ -638,6 +661,10 @@ class KocomGateway:
                                     asyncio.get_running_loop().time() - t0,
                                 )
                                 break
+
+                        if item.restore is not None and not self._is_current_restore(item):
+                            LOGGER.debug("Thermostat restore for %s is no longer current", item.key)
+                            break
 
                         if not self.conn._is_connected():
                             LOGGER.warning("Connection not ready. '%s' abort.", item.action)

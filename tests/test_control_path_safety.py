@@ -202,15 +202,27 @@ from custom_components.kocom_wallpad.transport import AsyncConnection
 
 
 class _Registry:
+    def __init__(self) -> None:
+        self.states: dict[tuple[int, int, int, int], DeviceState] = {}
+
     def get(self, key):
-        return None
+        return self.states.get(key.key)
 
 
 class _ControllerGateway:
-    registry = _Registry()
+    def __init__(self) -> None:
+        self.registry = _Registry()
+        self.live_keys: set[tuple[int, int, int, int]] = set()
+        self.restores: list[tuple[DeviceKey, float, int]] = []
 
     def on_device_state(self, _state):
         pass
+
+    def is_device_state_confirmed(self, key: DeviceKey) -> bool:
+        return key.key in self.live_keys
+
+    def queue_thermostat_restore(self, key: DeviceKey, target: float, restore: int) -> None:
+        self.restores.append((key, target, restore))
 
 
 def _thermostat_frame(
@@ -441,6 +453,217 @@ _REPORTS = {
     "airquality_status": "aa5530bc00010098010023110258012c19328c0d0d",
     "airquality_query": "aa5530bc00010098013a050003200000001e060d0d",
 }
+
+
+_HEAT, _OFF = 0x11, 0x00
+_NONE, _AWAY = 0x00, 0x01
+
+
+def _room_report(mode: int, preset: int, target: int, room: int = 1) -> bytes:
+    """Return a synthetic live thermostat status report to the wallpad."""
+    body = bytes((0x30, 0xBC, 0x00, 0x01, 0x00, 0x36, room, 0x00,
+                  mode, preset, target, 0x00, 20, 0x00, 0x00, 0x00))
+    return b"\xaa\x55" + body + bytes((sum(body) % 256, 0x0D, 0x0D))
+
+
+def _room_command(data0: int, data1: int, data2: int, room: int = 1) -> bytes:
+    """Return a thermostat command frame from the wallpad address to a room."""
+    body = bytes((0x30, 0xBC, 0x00, 0x36, room, 0x01, 0x00, 0x00,
+                  data0, data1, data2, 0x00, 0x00, 0x00, 0x00, 0x00))
+    return b"\xaa\x55" + body + bytes((sum(body) % 256, 0x0D, 0x0D))
+
+
+class ThermostatCommandTargetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gateway = _ControllerGateway()
+        self.gateway.on_device_state = self.record
+        self.controller = KocomController(self.gateway)
+        self.key = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
+
+    def record(self, _state: DeviceState) -> None:
+        if _state.platform == Platform.CLIMATE:
+            self.gateway.registry.states[_state.key.key] = _state
+            self.gateway.live_keys.add(_state.key.key)
+
+    def report(self, mode: int, preset: int, target: int) -> None:
+        self.controller.feed(_room_report(mode, preset, target))
+
+    def home(self) -> float | None:
+        return self.controller.home_target(1)
+
+    def frame(self, action: str, **kwargs: object) -> bytes:
+        packet, _, _ = self.controller.generate_command(self.key, action, **kwargs)
+        return packet
+
+    def test_synthetic_frames_match_the_protocol(self) -> None:
+        self.assertEqual(
+            bytes.fromhex("aa5530bc00010036010011001600140000005f0d0d"),
+            _room_report(_HEAT, _NONE, 22),
+        )
+        self.assertEqual(
+            bytes.fromhex("aa5530bc00360101000011001600000000004b0d0d"),
+            _room_command(0x11, 0x00, 22),
+        )
+
+    def test_home_target_follows_every_live_heat_report_with_preset_none(self) -> None:
+        steps = (
+            ((_HEAT, _NONE, 22), 22.0),
+            ((_HEAT, _NONE, 23), 23.0),
+            ((_OFF, _NONE, 18), 23.0),
+            ((_HEAT, _NONE, 19), 19.0),
+            ((_HEAT, _NONE, 4), 19.0),
+            ((_HEAT, _NONE, 41), 19.0),
+            ((_HEAT, _AWAY, 10), 19.0),
+        )
+        for report, expected in steps:
+            with self.subTest(report=report):
+                self.report(*report)
+                self.assertEqual(expected, self.home())
+        # A new connection keeps it; its first at-home report sets a new one.
+        self.controller.clear_change_record()
+        self.assertEqual(19.0, self.home())
+        self.report(_HEAT, _NONE, 24)
+        self.assertEqual(24.0, self.home())
+        # An exit the integration caused (set_temperature during away) is an
+        # ordinary at-home report.
+        self.report(_HEAT, _AWAY, 10)
+        self.controller.note_transmitted(self.frame("set_temperature", target_temp=25.0))
+        self.report(_HEAT, _NONE, 25)
+        self.assertEqual(25.0, self.home())
+        self.assertEqual([], self.gateway.restores)
+
+    def test_reports_while_a_restore_is_pending_keep_the_home_target(self) -> None:
+        for later in ((_HEAT, _AWAY, 10), (_OFF, _NONE, 10), (_OFF, _AWAY, 10)):
+            with self.subTest(later=later):
+                self.setUp()
+                self.report(_HEAT, _NONE, 22)
+                self.report(_HEAT, _AWAY, 10)
+                self.report(_HEAT, _NONE, 10)
+                self.assertEqual([(self.key, 22.0, 1)], self.gateway.restores)
+                self.assertTrue(self.controller.is_restore_pending(1, 1))
+                for _ in range(3):
+                    self.report(_HEAT, _NONE, 10)
+                self.assertEqual(22.0, self.home())
+                self.assertEqual(1, len(self.gateway.restores))
+                self.report(*later)
+                self.assertFalse(self.controller.is_restore_pending(1, 1))
+                self.assertEqual(22.0, self.home())
+
+    def test_failed_restore_then_repeated_exit_reports_keep_the_home_target(self) -> None:
+        self.report(_HEAT, _NONE, 22)
+        self.report(_HEAT, _AWAY, 10)
+        self.report(_HEAT, _NONE, 10)
+        # The restore send failed: the room keeps reporting the exit setting.
+        for _ in range(3):
+            self.report(_HEAT, _NONE, 10)
+        self.assertEqual(22.0, self.home())
+        self.report(_HEAT, _AWAY, 10)
+        self.assertFalse(self.controller.is_restore_pending(1, 1))
+        self.report(_HEAT, _NONE, 10)
+        self.assertEqual(
+            [(self.key, 22.0, 1), (self.key, 22.0, 2)], self.gateway.restores
+        )
+        self.assertTrue(self.controller.is_restore_pending(1, 2))
+
+    def test_a_new_connection_ends_the_pending_restore(self) -> None:
+        self.report(_HEAT, _NONE, 22)
+        self.report(_HEAT, _AWAY, 10)
+        self.report(_HEAT, _NONE, 10)
+        self.controller.clear_change_record()
+        self.assertFalse(self.controller.is_restore_pending(1, 1))
+        self.report(_HEAT, _NONE, 10)
+        self.assertFalse(self.controller.is_restore_pending(1, 1))
+        self.assertEqual(10.0, self.home())
+
+    def test_restored_home_target_lasts_until_the_first_live_at_home_report(self) -> None:
+        for room, value in enumerate((4, 41, 21.5, True, "22", None, 0.0), start=2):
+            with self.subTest(value=value):
+                self.controller.restore_home_target(room, value)
+                self.assertIsNone(self.controller.home_target(room))
+        self.controller.restore_home_target(1, 22.0)
+        self.assertEqual(22.0, self.home())
+        self.report(_HEAT, _AWAY, 10)
+        self.report(_OFF, _NONE, 10)
+        self.assertEqual(22.0, self.home())
+        self.report(_HEAT, _NONE, 20)
+        self.assertEqual(20.0, self.home())
+        self.controller.restore_home_target(1, 30.0)
+        self.assertEqual(20.0, self.home())
+
+    def test_preset_none_and_hvac_frames_while_away_with_a_home_target(self) -> None:
+        self.report(_HEAT, _NONE, 22)
+        self.report(_HEAT, _AWAY, 10)
+        self.assertEqual(_room_command(0x11, 0x00, 22), self.frame("set_preset", preset_mode="none"))
+        self.assertEqual(_room_command(0x11, 0x00, 22), self.frame("set_hvac", hvac_mode="heat"))
+        self.assertEqual(_room_command(0x00, 0x00, 22), self.frame("set_hvac", hvac_mode="off"))
+        self.assertEqual(
+            self.frame("set_temperature", target_temp=22.0),
+            self.frame("set_preset", preset_mode="none"),
+        )
+
+    def test_preset_none_and_hvac_frames_while_away_without_a_home_target(self) -> None:
+        self.report(_HEAT, _AWAY, 10)
+        self.assertIsNone(self.home())
+        self.assertEqual(_room_command(0x11, 0x00, 10), self.frame("set_preset", preset_mode="none"))
+        self.assertEqual(_room_command(0x11, 0x00, 10), self.frame("set_hvac", hvac_mode="heat"))
+        self.assertEqual(_room_command(0x00, 0x00, 10), self.frame("set_hvac", hvac_mode="off"))
+
+    def test_preset_none_and_hvac_frames_at_home_carry_the_live_target(self) -> None:
+        self.controller.restore_home_target(1, 22.0)
+        self.report(_OFF, _NONE, 23)
+        self.assertEqual(_room_command(0x11, 0x00, 23), self.frame("set_preset", preset_mode="none"))
+        self.assertEqual(_room_command(0x11, 0x00, 23), self.frame("set_hvac", hvac_mode="heat"))
+        self.assertEqual(_room_command(0x00, 0x00, 23), self.frame("set_hvac", hvac_mode="off"))
+
+    def test_set_preset_away_frame_is_the_base_frame(self) -> None:
+        self.report(_HEAT, _NONE, 22)
+        self.assertEqual(
+            bytes.fromhex("aa5530bc0036010100001101000000000000360d0d"),
+            self.frame("set_preset", preset_mode="away"),
+        )
+
+    def test_home_target_is_used_when_the_live_target_is_outside_the_range(self) -> None:
+        self.report(_HEAT, _NONE, 22)
+        self.report(_HEAT, _NONE, 0)
+        self.assertEqual(22.0, self.home())
+        self.assertEqual(_room_command(0x11, 0x00, 22), self.frame("set_preset", preset_mode="none"))
+        self.assertEqual(_room_command(0x00, 0x00, 22), self.frame("set_hvac", hvac_mode="off"))
+
+    def test_commands_are_refused_without_a_live_confirmed_state(self) -> None:
+        cases = (
+            ("set_preset", {"preset_mode": "none"}),
+            ("set_preset", {"preset_mode": "away"}),
+            ("set_hvac", {"hvac_mode": "heat"}),
+            ("set_hvac", {"hvac_mode": "off"}),
+        )
+        for setup in ("no state", "restored only"):
+            for action, args in cases:
+                with self.subTest(setup=setup, action=action, args=args):
+                    self.setUp()
+                    if setup == "restored only":
+                        self.gateway.registry.states[self.key.key] = DeviceState(
+                            self.key, Platform.CLIMATE, {},
+                            {"hvac_mode": "heat", "preset_mode": "none", "target_temp": 22.0},
+                        )
+                        self.controller.restore_home_target(1, 22.0)
+                    with self.assertRaises(RuntimeError):
+                        self.controller.generate_command(self.key, action, **args)
+        with self.assertRaises(ValueError):
+            self.controller.generate_command(self.key, "set_fan", fan_mode="low")
+
+    def test_target_outside_the_range_without_a_home_target_is_refused(self) -> None:
+        for target in (0, 4, 41):
+            for action, args in (
+                ("set_preset", {"preset_mode": "none"}),
+                ("set_hvac", {"hvac_mode": "heat"}),
+                ("set_hvac", {"hvac_mode": "off"}),
+            ):
+                with self.subTest(target=target, action=action):
+                    self.setUp()
+                    self.report(_HEAT, _NONE, target)
+                    self.assertIsNone(self.home())
+                    with self.assertRaises(RuntimeError):
+                        self.controller.generate_command(self.key, action, **args)
 
 
 class ProtocolFixtureTests(unittest.TestCase):
