@@ -2,7 +2,7 @@
     "domain": "kocom_wallpad",
     "name": "Kocom Wallpad",
     "codeowners": [
-        "@lunDreame"
+        "@ninthsword"
     ],
     "config_flow": true,
     "documentation": "https://github.com/ninthsword/kocom-wallpad",
@@ -11,5 +11,5 @@
     "requirements": [
         "serialx>=1.11.0"
     ],
-    "version": "2.0.5"
+    "version": "2.1.0"
 }
