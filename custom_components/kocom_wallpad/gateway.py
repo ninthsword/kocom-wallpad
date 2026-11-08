@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -463,7 +463,8 @@ class KocomGateway:
         if callable(get_stored_state):
             state = cast("restore_state.StoredState | None", get_stored_state(entity_id))
         else:
-            state = store.last_states.get(entity_id)
+            # Core 2026.11 no longer declares last_states; older Cores reach this branch.
+            state = cast("restore_state.StoredState | None", cast(Any, store).last_states.get(entity_id))
         if not (state and state.extra_data):
             return
         packet = state.extra_data.as_dict().get("packet")

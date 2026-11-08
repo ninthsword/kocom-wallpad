@@ -23,6 +23,11 @@ from .entity_base import KocomBaseEntity
 from .gateway import KocomGateway
 from .models import DeviceState
 
+# Core 2026.11 declares the native_ names as cached descriptors and older Cores do not
+# declare them, so no single pyright ignore fits every supported Core; typing the
+# decorator as Any keeps these overrides dynamic and valid on all of them.
+_dynamic_property: Any = property
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -61,7 +66,6 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
 
     _attr_min_temp = 5
     _attr_max_temp = 40
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
 
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
         """Initialize the climate."""
@@ -194,8 +198,8 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
 
         # 2. 난방 모드일 때 동작 상태 판단
         if self.hvac_mode == HVACMode.HEAT:
-            current = self.current_temperature
-            target = self.target_temperature
+            current = self.native_current_temperature
+            target = self.native_target_temperature
             
             # controller.py에서 값을 float로 넘겨주지만, 혹시 모를 None 체크
             if current is not None and target is not None:
@@ -234,20 +238,22 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
     def preset_modes(self) -> list[str]:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._device.attribute["preset_modes"]
 
-    @property
-    # HA declares a cached descriptor; retain dynamic property semantics.
-    def current_temperature(self) -> float | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+    @_dynamic_property
+    def native_current_temperature(self) -> float | None:
         if not self._state_is_confirmed:
             return None
         return self._device.state["current_temp"]
 
-    @property
-    # HA declares a cached descriptor; retain dynamic property semantics.
-    def target_temperature(self) -> float | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+    @_dynamic_property
+    def native_target_temperature(self) -> float | None:
         if not self._state_is_confirmed:
             return None
         return self._device.state["target_temp"]
-    
+
+    @_dynamic_property
+    def native_temperature_unit(self) -> str:
+        return UnitOfTemperature.CELSIUS
+
     @property
     # HA declares a cached descriptor; retain dynamic property semantics.
     def target_temperature_step(self) -> float:  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -274,3 +280,19 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
         await self._async_send_or_raise(
             "set temperature", "set_temperature", context=self._send_context(), **args
         )
+
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Opt this class's added/removed hooks in to in-place entity_id changes."""
+        super().async_entity_id_changed(old_entity_id)
+
+
+if not hasattr(ClimateEntity, "native_current_temperature"):
+    # Cores before 2026.11 read only the unprefixed names. Assigned here, not in the class
+    # body, because Core 2026.11 declares them Final and warns on a subclass defining them.
+    for _native_name in (
+        "native_current_temperature",
+        "native_target_temperature",
+        "native_temperature_unit",
+    ):
+        setattr(KocomClimate, _native_name.removeprefix("native_"), getattr(KocomClimate, _native_name))

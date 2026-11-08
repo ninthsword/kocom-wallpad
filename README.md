@@ -92,7 +92,7 @@ devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --python
 ```
 
 Pyright는 로그북 설명 모듈 `logbook.py`를 포함한 15개 통합구성요소 모듈과 오프라인 회귀 테스트 모듈 전체를
-실제 개발 의존성을 기준으로 검사합니다. Config-flow 테스트는 프로토콜 shim과 분리된
+실제 개발 의존성을 기준으로 검사합니다. Config-flow 테스트와 `tests/test_climate_core_compat.py`는 프로토콜 shim과 분리된
 새 서브프로세스에서 실제 Home Assistant로 실행됩니다. 나머지 테스트는 좁은 범위의 Home Assistant shim과 가짜
 트랜스포트를 사용해 네트워크나 실제 장치 접근 없이 패킷 바이트, 확인 응답, 재연결,
 종료 동작을 검증합니다. 또한 `DeviceState` 생성자, 데이터클래스 필드,
@@ -169,6 +169,25 @@ devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --python
 .venv-ha2026.10/bin/ruff check --no-cache custom_components tests tests_ha
 devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python devtools/ha2026_10_typing.py devtools/test_ha2026_10_typing.py
 .venv-ha2026.10/bin/ruff check --no-cache devtools/ha2026_10_typing.py devtools/test_ha2026_10_typing.py
+```
+
+## Home Assistant 2026.11 호환성 검증
+
+기존 검증 환경과 별도로 Home Assistant 2026.11.0, Python 3.14.7, `uv==0.12.5`,
+Node.js 24를 사용합니다. 의존성 입력과 해시 잠금 파일은
+`requirements-ha2026.11.in`, `requirements-ha2026.11.lock`입니다.
+
+CI 작업은 코어 버전 확인, Pyright, `tests` 아래의 unittest, Ruff를 실행합니다.
+`tests_ha`는 Core 2026.11용 테스트 플러그인이 나오면 이 작업에 추가합니다.
+현재 최신 플러그인은 Core 2026.10을 요구하여 2026.11.0에서 시작할 수 없습니다.
+
+```sh
+uv venv --python 3.14.7 .venv-ha2026.11
+uv pip sync --python .venv-ha2026.11/bin/python --require-hashes requirements-ha2026.11.lock
+npm ci --prefix devtools/pyright --ignore-scripts --no-audit --no-fund
+devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.11/bin/python
+.venv-ha2026.11/bin/python -B -m unittest discover -s tests -v
+.venv-ha2026.11/bin/ruff check --no-cache custom_components tests tests_ha
 ```
 
 ## 화면 검증

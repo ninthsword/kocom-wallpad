@@ -101,6 +101,13 @@ class KocomBaseEntity(RestoreEntity):
         self._unsubs.clear()
 
     @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Keep the subscription on an entity_id change; signals use the device key."""
+        base_changed = getattr(super(), "async_entity_id_changed", None)
+        if base_changed is not None:
+            base_changed(old_entity_id)
+
+    @callback
     def update_from_state(self) -> None:
         self.async_write_ha_state()
 
