@@ -114,6 +114,12 @@ class KocomController:
         self._thermo_commands: dict[int, tuple[float, bool, object | None]] = {}
         self._thermo_queries: dict[int, float] = {}
         self._change_sequence = 0
+        # Home target per primary thermostat room: the target of its latest
+        # live heat-mode report with preset none.  A pending restore (after a
+        # wallpad exit from away) is (identity, exit setting), this connection only.
+        self._home_targets: dict[int, float] = {}
+        self._pending_restores: dict[int, tuple[int, tuple[Any, Any, float]]] = {}
+        self._restore_sequence = 0
 
     @staticmethod
     def _thermostat_request(frame: PacketFrame) -> tuple[int, int] | None:
@@ -149,6 +155,73 @@ class KocomController:
         self._thermo_settings.clear()
         self._thermo_commands.clear()
         self._thermo_queries.clear()
+        self._pending_restores.clear()
+
+    @staticmethod
+    def _home_target_value(value: Any) -> float | None:
+        """Return a whole-degree target within 5..40, otherwise None."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        target = float(value)
+        if not target.is_integer() or not 5 <= target <= 40:
+            return None
+        return target
+
+    def home_target(self, room: int) -> float | None:
+        """Return the room's home target, or None when it is unknown."""
+        return self._home_targets.get(room)
+
+    def restore_home_target(self, room: int, value: Any) -> None:
+        """Use a value from the room's own thermostat snapshot until a live one."""
+        target = self._home_target_value(value)
+        if target is not None and room not in self._home_targets:
+            self._home_targets[room] = target
+
+    def is_restore_pending(self, room: int, restore: int) -> bool:
+        """Return whether this restore is still pending and the room still shows its exit setting."""
+        pending = self._pending_restores.get(room)
+        return (
+            pending is not None
+            and pending[0] == restore
+            and self._thermo_settings.get(room) == pending[1]
+        )
+
+    def _note_home_setting(
+        self,
+        key: DeviceKey,
+        previous: tuple[Any, Any, float] | None,
+        settings: tuple[Any, Any, float],
+        label: dict[str, Any] | None,
+    ) -> None:
+        """Update the home target from a live report, or start a restore after an exit."""
+        room = key.room_index
+        pending = self._pending_restores.get(room)
+        if pending is not None:
+            if settings == pending[1]:
+                return
+            del self._pending_restores[room]
+        mode, preset, target = settings
+        # The exit decision uses the home target as it was before this report,
+        # and the triggering report never updates it.
+        home = self._home_targets.get(room)
+        if (
+            previous is not None
+            and previous[1] == PRESET_AWAY
+            and preset == PRESET_NONE
+            and label is not None
+            and label["source"] != "integration"
+            and mode == HVACMode.HEAT
+            and home is not None
+            and target != home
+        ):
+            self._restore_sequence += 1
+            self._pending_restores[room] = (self._restore_sequence, settings)
+            self.gateway.queue_thermostat_restore(key, home, self._restore_sequence)
+            return
+        if mode == HVACMode.HEAT and preset == PRESET_NONE:
+            value = self._home_target_value(target)
+            if value is not None:
+                self._home_targets[room] = value
 
     def _change_label(self, room: int, settings: tuple[Any, Any, float]) -> dict[str, Any] | None:
         previous = self._thermo_settings.get(room)
@@ -358,9 +431,12 @@ class KocomController:
             }
             dev = DeviceState(key=key, platform=Platform.CLIMATE, attribute=attribute, state=state)
             if is_live_status and not restore_mode:
-                label = self._change_label(frame.dev_room, (havc_mode, preset_mode, target_temp))
+                settings = (havc_mode, preset_mode, target_temp)
+                previous = self._thermo_settings.get(frame.dev_room)
+                label = self._change_label(frame.dev_room, settings)
                 if label is not None:
                     dev._change_label = label
+                self._note_home_setting(key, previous, settings, label)
             states.append(dev)
             
             key = DeviceKey(
@@ -736,7 +812,7 @@ class KocomController:
         elif device_type == DeviceType.VENTILATION:
             data = self._generate_ventilation(action, data, **kwargs)
         elif device_type == DeviceType.THERMOSTAT:
-            data = self._generate_thermostat(action, data, **kwargs)
+            data = self._generate_thermostat(key, action, data, **kwargs)
         elif device_type == DeviceType.AIRCONDITIONER:
             data = self._generate_airconditioner(action, data, **kwargs)
         elif device_type == DeviceType.GASVALVE:
@@ -783,15 +859,20 @@ class KocomController:
             data[0] = 0x11 if action == "turn_on" else 0x00
         return data
 
-    def _generate_thermostat(self, action: str, data: bytearray, **kwargs: Any) -> bytearray:
+    def _generate_thermostat(self, key: DeviceKey, action: str, data: bytearray, **kwargs: Any) -> bytearray:
         if action == "set_hvac":
             hm = kwargs["hvac_mode"]
             data[0] = 0x11 if hm == HVACMode.HEAT else 0x00
             data[1] = 0x00
+            data[2] = self._preset_none_target(key)
         elif action == "set_preset":
             pm = kwargs["preset_mode"]
+            self._require_confirmed_thermostat(key)
             data[0] = 0x11
             data[1] = 0x01 if pm == PRESET_AWAY else 0x00
+            if pm != PRESET_AWAY:
+                # Away keeps target 0 so the wallpad applies its own away target.
+                data[2] = self._preset_none_target(key)
         elif action == "set_temperature":
             tt = self._encode_whole_temperature(kwargs["target_temp"])
             data[0] = 0x11
@@ -799,6 +880,26 @@ class KocomController:
         else:
             raise ValueError(f"Unsupported thermostat action: {action}")
         return data
+
+    def _require_confirmed_thermostat(self, key: DeviceKey) -> None:
+        if not self.gateway.is_device_state_confirmed(key):
+            raise RuntimeError("Thermostat has not reported its state in this connection")
+
+    def _preset_none_target(self, key: DeviceKey) -> int:
+        """Return the target byte of a frame whose preset byte is none."""
+        # A zero target byte makes the wallpad fall back to its minimum.
+        self._require_confirmed_thermostat(key)
+        dev = self.gateway.registry.get(key)
+        state = dev.state if dev is not None else None
+        if not isinstance(state, dict):
+            raise RuntimeError("Thermostat state is unknown")
+        target = self._home_target_value(state.get("target_temp"))
+        home = self._home_targets.get(key.room_index)
+        if home is not None and (state.get("preset_mode") == PRESET_AWAY or target is None):
+            return int(home)
+        if target is None:
+            raise RuntimeError("Thermostat target temperature is outside 5..40")
+        return int(target)
 
     @staticmethod
     def _encode_whole_temperature(value: Any) -> int:

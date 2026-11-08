@@ -16,6 +16,7 @@ from homeassistant.const import ATTR_TEMPERATURE, Platform, UnitOfTemperature
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoredExtraData
 
 from .const import DOMAIN, EVENT_THERMOSTAT_CHANGED, DeviceType, SubType
 from .entity_base import KocomBaseEntity
@@ -84,6 +85,28 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
         self._change_sequence = 0
         self._change_source: str | None = None
         self._change_time: datetime | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe, then restore the room's home target from this entity's snapshot."""
+        await super().async_added_to_hass()
+        if not self._is_primary_thermostat:
+            return
+        last = await self.async_get_last_extra_data()
+        if last is not None:
+            self.gateway.controller.restore_home_target(
+                self._device.key.room_index, last.as_dict().get("home_target")
+            )
+
+    @property
+    def extra_restore_state_data(self) -> RestoredExtraData:
+        """Add the room's home target to a primary thermostat's restore data."""
+        data = super().extra_restore_state_data
+        if not self._is_primary_thermostat:
+            return data
+        home = self.gateway.controller.home_target(self._device.key.room_index)
+        if home is None:
+            return data
+        return RestoredExtraData({**data.as_dict(), "home_target": home})
 
     @callback
     def update_from_state(self) -> None:
