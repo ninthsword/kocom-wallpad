@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
@@ -44,10 +44,11 @@ class KocomConfigFlow(ConfigFlow, domain=DOMAIN):
                     data={CONF_HOST: host, CONF_PORT: port}
                 )
 
-        schema = vol.Schema({
+        # Core 2026.11 types forms with probatio.Schema; voluptuous stays valid at runtime.
+        schema = cast(Any, vol.Schema({
             vol.Required(CONF_HOST): str,
             vol.Required(CONF_PORT, default=DEFAULT_TCP_PORT): int,
-        })
+        }))
         if user_input is not None:
             # Show the rejected values again so the user corrects them instead of retyping both.
             schema = self.add_suggested_values_to_schema(schema, user_input)
