@@ -1053,6 +1053,7 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
             create_autospec(ConfigEntry, instance=True),
             "test", 1,
         )
+        self.gateway.entry.data = types.MappingProxyType({})
         connection = self.gateway.conn
         assert isinstance(connection, _FakeConnection)
         self.connection: _FakeConnection = connection
@@ -2554,6 +2555,308 @@ class ChangeSourceGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.gateway.registry.get(other))
         self.assertEqual([], self.connection.sent)
         self.gateway._pendings.remove(waiter)
+
+
+_RELEASE_FRAME = bytes.fromhex("aa55309c000eff010066ffffffffffffffff380d0d")
+_RELEASE_OPTION = "cutoff_release_after_light"
+_CUTOFF_KEY = DeviceKey(DeviceType.LIGHTCUTOFF, 255, 0, SubType.NONE)
+
+
+class CutoffReleaseTests(unittest.IsolatedAsyncioTestCase):
+    gateway: KocomGateway
+    connection: _FakeConnection
+    asyncSetUp = GatewaySafetyTests.asyncSetUp
+    asyncTearDown = GatewaySafetyTests.asyncTearDown
+
+    def cutoff(self, value: bool | str = False, *, live=True):
+        state = DeviceState(_CUTOFF_KEY, Platform.BINARY_SENSOR, {}, value)
+        self.gateway._restore_mode = not live
+        self.gateway.on_device_state(state)
+        self.gateway._restore_mode = False
+        return state
+
+    def start(self):
+        self.gateway.entry.data = types.MappingProxyType({_RELEASE_OPTION: True})
+        self.gateway._connection_generation = 1
+        self.gateway._connection_available = True
+        self.cutoff()
+        self.key = DeviceKey(DeviceType.LIGHT, 1, 0, SubType.NONE)
+        self.connection.on_send = self.acknowledge
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+
+    def acknowledge(self, packet):
+        if packet != _RELEASE_FRAME:
+            self.gateway.on_device_state(DeviceState(
+                self.key, Platform.LIGHT, {}, packet[10] == 255,
+            ))
+
+    def delay(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        real_sleep = asyncio.sleep
+
+        async def sleep(seconds):
+            if seconds == 1.0:
+                entered.set()
+                await release.wait()
+            else:
+                await real_sleep(0)
+
+        return entered, release, patch.object(gateway_module.asyncio, "sleep", side_effect=sleep)
+
+    async def send(self, action="turn_on"):
+        return await self.gateway.async_send_action(self.key, action)
+
+    async def test_literal_frame_after_matching_on_and_off_is_serialized_once(self):
+        self.start()
+        self.assertEqual(21, len(_RELEASE_FRAME))
+        self.assertEqual(sum(_RELEASE_FRAME[2:18]) & 255, _RELEASE_FRAME[18])
+        entered, release, sleep_patch = self.delay()
+        with sleep_patch:
+            first = asyncio.create_task(self.send())
+            await asyncio.wait_for(entered.wait(), 0.5)
+            self.assertFalse(first.done())
+            self.assertEqual(1, len(self.connection.sent))
+            second = asyncio.create_task(self.send("turn_off"))
+            release.set()
+            self.assertTrue(await asyncio.wait_for(first, 0.5))
+            self.assertTrue(await asyncio.wait_for(second, 0.5))
+        self.assertEqual(4, len(self.connection.sent))
+        self.assertEqual(_RELEASE_FRAME, self.connection.sent[1])
+        self.assertEqual(_RELEASE_FRAME, self.connection.sent[3])
+        self.assertEqual(255, self.connection.sent[0][10])
+        self.assertEqual(0, self.connection.sent[2][10])
+        self.assertGreater(self.gateway._last_tx_monotonic, 0)
+
+    async def test_disabled_unknown_restored_and_unconfirmed_cutoff_skip_delay(self):
+        self.start()
+        with patch.object(gateway_module.asyncio, "sleep", new=AsyncMock()) as sleep:
+            for option in ({}, {_RELEASE_OPTION: False}, {_RELEASE_OPTION: 1},
+                           {_RELEASE_OPTION: "true"}, {_RELEASE_OPTION: None}):
+                self.gateway.entry.data = types.MappingProxyType(option)
+                self.assertTrue(await self.send())
+            self.gateway.entry.data = types.MappingProxyType({_RELEASE_OPTION: True})
+            for kind in ("missing", "on", "unknown", "restored", "unconfirmed"):
+                self.gateway._live_device_keys.discard(_CUTOFF_KEY.key)
+                self.gateway.registry._states.pop(_CUTOFF_KEY.key, None)
+                if kind != "missing":
+                    self.cutoff(True if kind == "on" else "unknown" if kind == "unknown" else False,
+                                live=kind not in ("restored", "unconfirmed"))
+                self.assertTrue(await self.send())
+            sleep.assert_not_awaited()
+        self.assertEqual(10, len(self.connection.sent))
+        self.assertNotIn(_RELEASE_FRAME, self.connection.sent)
+
+    async def test_false_waiter_wrong_state_and_old_generation_do_not_qualify(self):
+        self.start()
+        wrong_key = DeviceKey(DeviceType.LIGHT, 2, 0, SubType.NONE)
+        for response in (False, DeviceState(wrong_key, Platform.LIGHT, {}, True),
+                         DeviceState(self.key, Platform.LIGHT, {}, False)):
+            with patch.object(self.gateway, "_wait_for_confirmation", new=AsyncMock(return_value=response)):
+                self.assertTrue(await self.send())  # Existing original result semantics.
+        def reconnect(packet):
+            self.acknowledge(packet)
+            self.gateway._connection_generation += 1
+            self.cutoff()
+        self.connection.on_send = reconnect
+        self.assertTrue(await self.send())
+        self.assertEqual(4, len(self.connection.sent))
+        self.assertNotIn(_RELEASE_FRAME, self.connection.sent)
+
+    async def test_delay_revalidates_cutoff_option_generation_connection_and_stop(self):
+        self.start()
+        for change in ("cutoff", "option", "generation", "connection", "stop", "confirmation"):
+            self.gateway.entry.data = types.MappingProxyType({_RELEASE_OPTION: True})
+            self.connection.connected = True
+            self.gateway._stopping = False
+            self.cutoff()
+            entered, release, sleep_patch = self.delay()
+            with sleep_patch:
+                caller = asyncio.create_task(self.send())
+                await asyncio.wait_for(entered.wait(), 0.5)
+                if change == "cutoff":
+                    self.cutoff(True)
+                elif change == "option":
+                    self.gateway.entry.data = types.MappingProxyType({_RELEASE_OPTION: False})
+                elif change == "generation":
+                    self.gateway._connection_generation += 1
+                elif change == "connection":
+                    self.connection.connected = False
+                elif change == "stop":
+                    self.gateway._stopping = True
+                else:
+                    self.gateway._live_device_keys.clear()
+                release.set()
+                self.assertTrue(await asyncio.wait_for(caller, 0.5))
+        self.assertEqual(6, len(self.connection.sent))
+        self.assertNotIn(_RELEASE_FRAME, self.connection.sent)
+
+    async def test_caller_cancellation_during_delay_skips_and_queue_progresses(self):
+        self.start()
+        entered, release, sleep_patch = self.delay()
+        with sleep_patch:
+            caller = asyncio.create_task(self.send())
+            await asyncio.wait_for(entered.wait(), 0.5)
+            caller.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await caller
+            self.gateway.entry.data = types.MappingProxyType({_RELEASE_OPTION: False})
+            next_caller = asyncio.create_task(self.send("turn_off"))
+            release.set()
+            self.assertTrue(await asyncio.wait_for(next_caller, 0.5))
+        self.assertEqual(2, len(self.connection.sent))
+        await asyncio.wait_for(self.gateway._tx_queue.join(), 0.5)
+
+    async def test_sender_shutdown_retains_acknowledged_true_during_supplement(self):
+        self.start()
+        entered, _release, sleep_patch = self.delay()
+        with sleep_patch:
+            caller = asyncio.create_task(self.send())
+            await asyncio.wait_for(entered.wait(), 0.5)
+            await self.gateway.async_stop()
+            self.assertTrue(await asyncio.wait_for(caller, 0.5))
+        self.assertTrue(self.gateway._stopping)
+        self.assertEqual(1, len(self.connection.sent))
+        await asyncio.wait_for(self.gateway._tx_queue.join(), 0.5)
+
+    async def test_stop_flag_precedes_first_shutdown_await(self):
+        self.start()
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def reader():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                entered.set()
+                await release.wait()
+        self.gateway._task_reader = asyncio.create_task(reader())
+        await asyncio.sleep(0)
+        stopper = asyncio.create_task(self.gateway.async_stop())
+        await asyncio.wait_for(entered.wait(), 0.5)
+        self.assertTrue(self.gateway._stopping)
+        release.set()
+        await stopper
+
+    async def test_busy_admission_rechecks_every_guard_and_skips_persistently_busy_bus(self):
+        self.start()
+        real_sleep = asyncio.sleep
+        for change in ("cutoff", "option", "generation", "connection", "stop", "cancel", "busy"):
+            self.connection.idle = True
+            self.connection.connected = True
+            self.gateway._stopping = False
+            self.gateway.entry.data = types.MappingProxyType({_RELEASE_OPTION: True})
+            self.cutoff()
+            entered, resume = asyncio.Event(), asyncio.Event()
+            async def sleep(seconds, *, entered=entered, resume=resume):
+                if seconds == 1.0:
+                    self.connection.idle = False
+                elif seconds == 0.01:
+                    entered.set()
+                    await resume.wait()
+                await real_sleep(0)
+            with patch.object(gateway_module.asyncio, "sleep", side_effect=sleep):
+                caller = asyncio.create_task(self.send())
+                await asyncio.wait_for(entered.wait(), 0.5)
+                if change == "cutoff":
+                    self.cutoff(True)
+                elif change == "option":
+                    self.gateway.entry.data = types.MappingProxyType({_RELEASE_OPTION: False})
+                elif change == "generation":
+                    self.gateway._connection_generation += 1
+                elif change == "connection":
+                    self.connection.connected = False
+                elif change == "stop":
+                    self.gateway._stopping = True
+                elif change == "cancel":
+                    caller.cancel()
+                # Advance only the budget clock; avoid a real one-second busy loop.
+                clock_start = asyncio.get_running_loop().time() + 2.0
+                with patch.object(asyncio.get_running_loop(), "time", side_effect=itertools.count(clock_start, 2)):
+                    resume.set()
+                    if change == "cancel":
+                        with self.assertRaises(asyncio.CancelledError):
+                            await caller
+                    else:
+                        self.assertTrue(await caller)
+        self.assertEqual(7, len(self.connection.sent))
+        self.assertNotIn(_RELEASE_FRAME, self.connection.sent)
+
+    async def test_supplement_failure_preserves_actual_light_result_and_live_state(self):
+        self.start()
+        cutoff = self.gateway.registry.get(_CUTOFF_KEY)
+        def send(packet):
+            if packet == _RELEASE_FRAME:
+                raise OSError("synthetic transport failure")
+            self.acknowledge(packet)
+        self.connection.on_send = send
+        entered, release, sleep_patch = self.delay()
+        release.set()
+        with sleep_patch:
+            self.assertTrue(await self.send())
+        self.assertTrue(entered.is_set())
+        self.assertEqual(2, len(self.connection.sent))
+        self.assertIs(cutoff, self.gateway.registry.get(_CUTOFF_KEY))
+        self.assertTrue(self.gateway.is_device_state_confirmed(_CUTOFF_KEY))
+
+    async def test_exact_owned_echo_cannot_overwrite_genuine_cutoff_on_and_resets(self):
+        self.start()
+        def send(packet):
+            if packet == _RELEASE_FRAME:
+                self.gateway.controller.feed(bytes.fromhex(_REPORTS["cutoff_on"]))
+                self.gateway.controller.feed(packet)
+            else:
+                self.acknowledge(packet)
+        self.connection.on_send = send
+        entered, release, sleep_patch = self.delay()
+        release.set()
+        with sleep_patch:
+            self.assertTrue(await self.send())
+        self.assertTrue(entered.is_set())
+        cutoff = self.gateway.registry.get(_CUTOFF_KEY)
+        assert cutoff is not None
+        self.assertIs(cutoff.state, True)
+        waiter = self.gateway._register_confirmation(_CUTOFF_KEY, lambda dev: dev.state is False)
+        self.gateway.controller.feed(_RELEASE_FRAME)
+        self.assertFalse(waiter.future.done())
+        # An ordinary status frame with the same semantic off value is still accepted.
+        off = bytearray.fromhex(_REPORTS["cutoff_on"])
+        off[9] = 0x66
+        off[18] = sum(off[2:18]) & 255
+        self.gateway.controller.feed(bytes(off))
+        self.assertTrue(waiter.future.done())
+        cutoff = self.gateway.registry.get(_CUTOFF_KEY)
+        assert cutoff is not None
+        self.assertIs(cutoff.state, False)
+        self.connection.connected = False
+        self.gateway._sync_connection_availability()
+        self.connection.connected = True
+        self.gateway._sync_connection_availability()
+        self.gateway.controller.feed(_RELEASE_FRAME)
+        self.assertTrue(self.gateway.is_device_state_confirmed(_CUTOFF_KEY))
+
+    async def test_enabled_reports_and_status_query_only_send_no_supplement(self):
+        self.start()
+        self.gateway.controller.feed(_light_report(1, bytes((0, 0, 0, 0, 0, 0, 0, 0))))
+        await asyncio.sleep(0)
+        self.assertEqual([], self.connection.sent)
+        key = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
+        item = _CmdItem(key, "status_query", {}, connection_generation=1)
+        self.gateway._tx_queue.put_nowait(item)
+        self.assertTrue(await item.future)
+        self.assertEqual(1, len(self.connection.sent))
+        self.assertEqual(0x3A, self.connection.sent[0][9])
+        self.assertNotIn(_RELEASE_FRAME, self.connection.sent)
+
+    async def test_failed_original_and_nonlight_actions_never_supplement(self):
+        self.start()
+        self.connection.on_send = None
+        self.assertFalse(await self.send())
+        self.assertEqual(3, len(self.connection.sent))
+        self.assertNotIn(_RELEASE_FRAME, self.connection.sent)
+        for key, action in ((DeviceKey(DeviceType.OUTLET, 1, 0, SubType.NONE), "turn_on"),
+                            (_CUTOFF_KEY, "turn_off"), (self.key, "status_query")):
+            item = _CmdItem(key, action, {})
+            self.gateway._tx_queue.put_nowait(item)
+            await item.future
+        self.assertNotIn(_RELEASE_FRAME, self.connection.sent)
 
 
 if __name__ == "__main__":

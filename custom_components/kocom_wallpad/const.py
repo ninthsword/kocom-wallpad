@@ -23,6 +23,8 @@ PACKET_PREFIX = bytes([0xAA, 0x55])
 PACKET_SUFFIX = bytes([0x0D, 0x0D])
 PACKET_LEN = 21
 
+CONF_CUTOFF_RELEASE_AFTER_LIGHT = "cutoff_release_after_light"
+
 DEFAULT_TCP_PORT = 8899
 RECV_POLL_SEC = 0.05  # 50ms polling
 IDLE_GAP_SEC = 0.20   # 보내기 전 라인 유휴로 보고 싶은 최소 간격

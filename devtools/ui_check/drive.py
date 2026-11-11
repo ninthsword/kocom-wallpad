@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ THERMOSTAT_ENTITIES = ("난방 0-0", "난방 1-0", "보일러 오류코드 0-0",
 CURRENT_TEMPERATURE = re.compile(r"현재 온도: ?20 ?°C")
 ENTITY_COUNT = 19
 LISTED_ENTITIES = ("엘리베이터 0-0", "움직임 감지기(현관) 0-0", "환기 0-0", "환기 CO2 0-0", "에어컨 2-0", "일괄소등 255-0")
+CUTOFF_OPTION = "조명 명령 후 일괄소등 해제 추가 송신"
 PORT_ERROR = "TCP 포트는 1부터 65535 사이의 값으로 입력하세요."
 SEARCH = "공기질"
 UNRELATED_ROW = "난방 1-0"  # visible in the entity list until the search filters it out
@@ -152,6 +154,185 @@ def accept_http_config(page: Page) -> None:
     title.wait_for(state="hidden", timeout=WAIT_MS)
 
 
+def keyboard_reach(page: Page, target: Locator, *, reverse: bool = False) -> None:
+    """Reach a native control through the dialog's keyboard order."""
+    for _ in range(25):
+        page.keyboard.press("Shift+Tab" if reverse else "Tab")
+        if target.evaluate("element => element.matches(':focus')"):
+            expect(target).to_be_focused()
+            assert target.evaluate("element => element.matches(':focus-visible')")
+            return
+    raise StepError("settings: keyboard could not reach the native control")
+
+
+def contained_focus(
+    dialog: Locator, phase: str, *, allow_browser_boundary: bool = False
+) -> str:
+    """Distinguish composed modal focus from a native outside-document boundary."""
+    result = dialog.evaluate("""dialog => {
+        let active = document.activeElement;
+        while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+        const nativeModal = dialog instanceof HTMLDialogElement && dialog.open && dialog.matches(':modal');
+        const path = [];
+        let contained = false;
+        for (let node = active; node; node = node.assignedSlot || node.parentNode || node.host) {
+            path.push(node.nodeName);
+            if (node === dialog) {
+                contained = true;
+                break;
+            }
+        }
+        return {contained, path, focused: document.hasFocus(), nativeModal};
+    }""")
+    application_focus = result["contained"] and result["focused"] and result["nativeModal"]
+    browser_boundary = (
+        allow_browser_boundary
+        and result["nativeModal"]
+        and not result["focused"]
+        and result["path"] == ["BODY", "HTML", "#document"]
+    )
+    category = "application" if application_focus else "browser_boundary" if browser_boundary else "invalid"
+    print("Settings focus observation: " + json.dumps({"phase": phase, "category": category, **result}))
+    assert application_focus or browser_boundary, f"settings {phase}: focus escaped the modal dialog: {result}"
+    return category
+
+
+def settings_captures(page: Page, shots: Shots, desktop: str, phone: str) -> None:
+    for viewport, name in ((DESKTOP, desktop), (PHONE, phone)):
+        page.set_viewport_size(viewport)
+        expect(page.get_by_role("checkbox", name=CUTOFF_OPTION)).to_be_visible()
+        shots.take(page, name)
+    page.set_viewport_size(DESKTOP)
+
+
+def reconfigure_settings(page: Page, base: str, shots: Shots) -> None:
+    """Save, reopen and cancel the native one-checkbox flow at both sizes."""
+    page.goto(base + "/config/integrations/integration/kocom_wallpad")
+    see_text(page, f"{len(DEVICES)}개 기기", "reconfigure integration")
+    cutoff = page.evaluate("""async uniqueId => {
+        const hass = document.querySelector('home-assistant').hass;
+        const entries = await hass.callWS({type: 'config/entity_registry/list'});
+        const matches = entries.filter(entry => entry.platform === 'kocom_wallpad'
+            && entry.unique_id === uniqueId && entry.entity_id.startsWith('binary_sensor.'));
+        if (matches.length !== 1) throw new Error('Synthetic cutoff registry identity is not unique');
+        const entityId = matches[0].entity_id;
+        const state = hass.states[entityId];
+        return {entity_id: entityId, state: state?.state, friendly_name: state?.attributes.friendly_name};
+    }""", f"2-255_0-0:{HOST}")
+    cutoff_entity_id = cutoff["entity_id"]
+    print("Settings availability target: " + json.dumps(cutoff, ensure_ascii=False))
+
+    def open_settings() -> tuple[Locator, Locator]:
+        trigger = page.locator("ha-config-entry-row").get_by_role("button", name="메뉴", exact=True).first
+        see(trigger, "메뉴", "reconfigure")
+        trigger.focus()
+        trigger.press("Enter")
+        action = page.get_by_role("menuitem", name="재구성", exact=True)
+        see(action, "재구성", "reconfigure menu")
+        # Native dropdowns keep their own active item; navigate that item
+        # instead of sending Enter directly to an unfocused menu locator.
+        for _ in range(20):
+            if action.evaluate("element => element.matches(':focus-within')"):
+                break
+            page.keyboard.press("ArrowDown")
+        else:
+            raise StepError("reconfigure menu: keyboard could not reach 재구성")
+        page.keyboard.press("Enter")
+        checkbox = page.get_by_role("checkbox", name=CUTOFF_OPTION)
+        see(checkbox, CUTOFF_OPTION, "reconfigure")
+        dialog = page.get_by_role("dialog").filter(visible=True).last
+        contained_focus(dialog, "entry")
+        flow = page.locator("dialog-data-entry-flow")
+        expect(flow.get_by_role("textbox")).to_have_count(0)
+        expect(flow.get_by_role("spinbutton")).to_have_count(0)
+        # Native modal navigation may reach an outside-document boundary;
+        # the next real key must return to the modal, never its webpage background.
+        for key in ("Tab", "Shift+Tab"):
+            needs_return = False
+            for index in range(8):
+                page.keyboard.press(key)
+                category = contained_focus(dialog, f"{key} {index + 1}", allow_browser_boundary=True)
+                if needs_return:
+                    assert category == "application", "settings: keyboard did not return to the modal"
+                needs_return = category == "browser_boundary"
+            if needs_return:
+                page.keyboard.press(key)
+                contained_focus(dialog, f"{key} return")
+        keyboard_reach(page, checkbox)
+        contained_focus(dialog, "checkbox keyboard target")
+        return dialog, trigger
+
+    def save(dialog: Locator) -> None:
+        flow = page.locator("dialog-data-entry-flow")
+        button = flow.get_by_role("button", name=re.compile("^(확인|제출)$"))
+        keyboard_reach(page, button)
+        contained_focus(dialog, "submit Enter activation")
+        button.press("Enter")
+        # Wait for the response before inspecting a possible native success page.
+        expect(flow.get_by_role("checkbox", name=CUTOFF_OPTION)).not_to_be_visible(timeout=WAIT_MS)
+        finish = flow.get_by_role("button", name=re.compile("^(완료|닫기)$")).filter(visible=True)
+        if finish.count():
+            finish.last.click()
+        expect(dialog).not_to_be_visible(timeout=WAIT_MS)
+        page.wait_for_function("""entityId => {
+            const state = document.querySelector('home-assistant').hass.states[entityId];
+            return state && state.state !== 'unavailable' && state.state !== 'unknown';
+        }""", arg=cutoff_entity_id, timeout=WAIT_MS)
+        state = page.evaluate("""entityId => {
+            const state = document.querySelector('home-assistant').hass.states[entityId];
+            return {entity_id: entityId, state: state.state, friendly_name: state.attributes.friendly_name};
+        }""", cutoff_entity_id)
+        print("Settings availability after reload: " + json.dumps(state, ensure_ascii=False))
+
+    # Initial setup saved off. Save on, reopen, capture and cancel a local toggle.
+    for viewport in (DESKTOP, PHONE):
+        page.set_viewport_size(viewport)
+        dialog, _trigger = open_settings()
+        checkbox = page.get_by_role("checkbox", name=CUTOFF_OPTION)
+        expect(checkbox).not_to_be_checked()
+        expect(checkbox).to_be_focused()
+        contained_focus(dialog, "checkbox Space activation")
+        checkbox.press("Space")
+        expect(checkbox).to_be_checked()
+        save(dialog)
+        dialog, trigger = open_settings()
+        expect(checkbox).to_be_checked()
+        shots.take(page, "17-reconfigure-on-1440" if viewport == DESKTOP else "17-reconfigure-on-390")
+        expect(checkbox).to_be_focused()
+        contained_focus(dialog, "checkbox Space activation before cancel")
+        checkbox.press("Space")
+        expect(checkbox).not_to_be_checked()
+        page.keyboard.press("Escape")
+        # Core protects dirty forms from accidental Escape dismissal.
+        expect(dialog).to_be_visible()
+        expect(checkbox).not_to_be_checked()
+        close = page.locator("dialog-data-entry-flow").get_by_role("button", name="닫기", exact=True)
+        keyboard_reach(page, close)
+        contained_focus(dialog, "native Close Enter activation")
+        close.press("Enter")
+        expect(dialog).not_to_be_visible()
+        expect(trigger).to_be_focused()
+        dialog, trigger = open_settings()
+        expect(checkbox).to_be_checked()  # Closing discarded the unsaved local change.
+        page.keyboard.press("Escape")
+        expect(dialog).not_to_be_visible()
+        expect(trigger).to_be_focused()
+        dialog, _trigger = open_settings()
+        expect(checkbox).to_be_checked()
+        expect(checkbox).to_be_focused()
+        contained_focus(dialog, "checkbox Space activation")
+        checkbox.press("Space")
+        expect(checkbox).not_to_be_checked()
+        save(dialog)
+        dialog, trigger = open_settings()
+        expect(checkbox).not_to_be_checked()
+        shots.take(page, "18-reconfigure-off-1440" if viewport == DESKTOP else "18-reconfigure-off-390")
+        page.keyboard.press("Escape")
+        expect(dialog).not_to_be_visible()
+        expect(trigger).to_be_focused()
+    page.set_viewport_size(DESKTOP)
+
+
 def steps(page: Page, base: str, shots: Shots, wallpad_port: int) -> None:
     page.goto(base + "/")
     user = page.get_by_label("사용자 이름")
@@ -189,15 +370,27 @@ def steps(page: Page, base: str, shots: Shots, wallpad_port: int) -> None:
     # loses focus (observed in a failed run), so the host is filled before the description is read.
     host.fill(HOST)
     see_text(page, "시리얼 통신인 경우 호스트에 입력하고 포트는 무시하세요.", screen)
+    checkbox = page.get_by_role("checkbox", name=CUTOFF_OPTION)
+    see(checkbox, CUTOFF_OPTION, screen)
+    expect(checkbox).not_to_be_checked()
+    port.focus()
+    keyboard_reach(page, checkbox)
+    checkbox.press("Space")
+    expect(checkbox).to_be_checked()
     port.fill("0")
     page.get_by_role("button", name=re.compile("^(확인|제출)$")).click()
     see_text(page, PORT_ERROR, f"{screen} with port 0")
     # The form keeps what was typed after an error, so only the port is corrected.
     kept(host, HOST, "호스트", f"{screen} after the port error")
     kept(port, "0", "포트", f"{screen} after the port error")
-    shots.take(page, "04-flow-port-error")
+    expect(checkbox).to_be_checked()
+    settings_captures(page, shots, "04-flow-port-error", "04-flow-port-error-390")
     port.fill(str(wallpad_port))
-    shots.take(page, "05-flow-user")
+    port.focus()
+    keyboard_reach(page, checkbox, reverse=True)
+    checkbox.press("Space")
+    expect(checkbox).not_to_be_checked()
+    settings_captures(page, shots, "05-flow-user", "05-flow-user-390")
     page.get_by_role("button", name=re.compile("^(확인|제출)$")).click()
 
     screen = "config flow device step"
@@ -281,6 +474,7 @@ def steps(page: Page, base: str, shots: Shots, wallpad_port: int) -> None:
         shots.take(page, name)
     page.keyboard.press("Escape")
     expect(cutoff_dialog).not_to_be_visible()
+    reconfigure_settings(page, base, shots)
 
 
 def run(base: str, out: Path, wallpad_port: int) -> None:

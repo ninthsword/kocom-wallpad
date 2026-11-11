@@ -19,6 +19,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from .const import (
     BOOTSTRAP_REQUERY_INTERVAL,
     CMD_CONFIRM_TIMEOUT,
+    CONF_CUTOFF_RELEASE_AFTER_LIGHT,
     DOMAIN,
     IDLE_GAP_SEC,
     LOGGER,
@@ -149,12 +150,14 @@ class KocomGateway:
         self._force_register_uid: str | None = None
         self._live_device_keys: set[tuple[int, int, int, int]] = set()
         self._active_item: _CmdItem | None = None
+        self._stopping = False
         self._connection_available: bool = False
         self._connection_generation: int = 0
         self._bootstrap_scheduled_generation: int | None = None
         self._bootstrap_registry_keys: set[DeviceKey] = set()
 
     async def async_start(self) -> None:
+        self._stopping = False
         LOGGER.info("Starting gateway - %s:%s", self.host, self.port or "")
         await self.conn.open()
         self._last_rx_monotonic = self.conn.idle_since()
@@ -165,6 +168,7 @@ class KocomGateway:
         self._task_freshness_queries = asyncio.create_task(self._async_freshness_queries())
 
     async def async_stop(self, event: Event | None = None) -> None:
+        self._stopping = True
         LOGGER.info("Stopping gateway - %s:%s", self.host, self.port or "")
         if self._task_reader:
             self._task_reader.cancel()
@@ -666,12 +670,54 @@ class KocomGateway:
             and self.controller.is_restore_pending(item.key.room_index, item.restore)
         )
 
+    async def _async_cutoff_release(self, item: _CmdItem, generation: int) -> None:
+        """Optionally supplement a confirmed light command in the serialized sender."""
+        cutoff_key = DeviceKey(DeviceType.LIGHTCUTOFF, 255, 0, SubType.NONE)
+
+        def eligible() -> bool:
+            cutoff = self.registry.get(cutoff_key)
+            return (
+                item.key.device_type == DeviceType.LIGHT
+                and item.key.room_index != 255
+                and item.action in ("turn_on", "turn_off")
+                and self.entry.data.get(CONF_CUTOFF_RELEASE_AFTER_LIGHT) is True
+                and not item.future.done()
+                and not self._stopping
+                and self.conn._is_connected()
+                and self._connection_generation == generation
+                and self.is_device_state_confirmed(cutoff_key)
+                and cutoff is not None
+                and cutoff.state is False
+            )
+
+        if not eligible():
+            return
+        await asyncio.sleep(1.0)
+        if not eligible():
+            return
+        start = asyncio.get_running_loop().time()
+        while not self.is_idle():
+            if not eligible() or asyncio.get_running_loop().time() - start >= 1.0:
+                return
+            await asyncio.sleep(0.01)
+        # This is the existing fork's model-specific recipe, not a status update.
+        body = bytes((0x30, 0x9C, 0x00, 0x0E, 0xFF, 0x01, 0x00, 0x66)) + b"\xff" * 8
+        packet = b"\xaa\x55" + body + bytes((sum(body) & 0xFF, 0x0D, 0x0D))
+        try:
+            if eligible() and self.is_idle():
+                self.controller.note_transmitted(packet, cutoff_release=True)
+                await self.conn.send(packet)
+                self._last_tx_monotonic = asyncio.get_running_loop().time()
+        except (OSError, RuntimeError, TimeoutError) as err:
+            LOGGER.warning("일괄소등 해제 추가 송신에 실패했습니다: %s", err)
+
     async def _sender_loop(self) -> None:
         LOGGER.debug("Starting sender loop")
         try:
             while True:
                 item = await self._tx_queue.get()
                 self._active_item = item
+                acknowledged = False
                 try:
                     if item is None or item.future.done():
                         continue
@@ -710,6 +756,7 @@ class KocomGateway:
                         continue
 
                     success = False
+                    generation = self._connection_generation
                     for attempt in range(1, SEND_RETRY_MAX + 1):
                         LOGGER.debug("TX idle wait (max 1.0s) before '%s'...", item.action)
                         t0 = asyncio.get_running_loop().time()
@@ -736,6 +783,7 @@ class KocomGateway:
 
                         # Note the transmission first: a reply can be read in the
                         # same turn; the note stays if the send then fails.
+                        generation = self._connection_generation
                         self.controller.note_transmitted(packet, item.context)
                         try:
                             await self.conn.send(packet)
@@ -751,7 +799,12 @@ class KocomGateway:
                         self._last_tx_monotonic = asyncio.get_running_loop().time()
 
                         try:
-                            await self._wait_for_confirmation(waiter, timeout)
+                            confirmation = await self._wait_for_confirmation(waiter, timeout)
+                            acknowledged = (
+                                isinstance(confirmation, DeviceState)
+                                and confirmation.key == item.key
+                                and expect_predicate(confirmation)
+                            )
                             LOGGER.debug(
                                 "Command '%s' confirmed (attempt %d).",
                                 item.action,
@@ -777,11 +830,13 @@ class KocomGateway:
                                     SEND_RETRY_MAX,
                                 )
 
+                    if acknowledged:
+                        await self._async_cutoff_release(item, generation)
                     if not item.future.done():
                         item.future.set_result(success)
                 except asyncio.CancelledError:
                     if item is not None and not item.future.done():
-                        item.future.set_result(False)
+                        item.future.set_result(acknowledged)
                     raise
                 finally:
                     self._tx_queue.task_done()

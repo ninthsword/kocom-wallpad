@@ -114,6 +114,7 @@ class KocomController:
         self._thermo_commands: dict[int, tuple[float, bool, object | None]] = {}
         self._thermo_queries: dict[int, float] = {}
         self._change_sequence = 0
+        self._cutoff_release_echo: bytes | None = None
         # Home target per primary thermostat room: the target of its latest
         # live heat-mode report with preset none.  A pending restore (after a
         # wallpad exit from away) is (identity, exit setting), this connection only.
@@ -145,13 +146,18 @@ class KocomController:
         else:
             self._thermo_queries[room] = now
 
-    def note_transmitted(self, packet: bytes, context: object | None = None) -> None:
+    def note_transmitted(
+        self, packet: bytes, context: object | None = None, *, cutoff_release: bool = False
+    ) -> None:
         """Note a frame the gateway is about to transmit, for change labels."""
+        if cutoff_release:
+            self._cutoff_release_echo = packet
         if len(packet) == PACKET_LEN:
             self._note_request(PacketFrame(packet), True, context)
 
     def clear_change_record(self) -> None:
         """Forget previous live settings and frame windows (new connection)."""
+        self._cutoff_release_echo = None
         self._thermo_settings.clear()
         self._thermo_commands.clear()
         self._thermo_queries.clear()
@@ -301,6 +307,9 @@ class KocomController:
         frame = PacketFrame(packet)
         if self._checksum(packet[2:18]) != frame.checksum:
             LOGGER.debug("Packet checksum is invalid. raw=%s", frame.raw.hex())
+            return
+
+        if packet == self._cutoff_release_echo:
             return
 
         dev_state = None
