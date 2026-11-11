@@ -17,6 +17,8 @@ DRAIN = 5.0  # how long stop() keeps reading a connection that has not ended
 FRAMES = {
     "thermostat_room1": "aa5530bc00010036010010001500140000005d0d0d",
     "thermostat_living": "aa5530bc00010036000010001500140000005c0d0d",
+    # Synthetic existing-protocol cutoff status, not a captured hardware trace.
+    "cutoff_on": "aa5530bc0001000eff6500000000000000005f0d0d",
     "ac_on": "aa5530bc000100390200100003001a1600006b0d0d",
     "vent_on": "aa5530bc0001004800001102800007230200f40d0d",
     "elevator_arrival": "aa5530bc0001004400000331320000000000970d0d",

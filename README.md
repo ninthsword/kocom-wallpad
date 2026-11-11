@@ -1,67 +1,65 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
 
-# Kocom Wallpad Integration for Home Assistant
-Home Assistant를 위한 Kocom Wallpad 통합구성요소
+# 코콤 월패드 Home Assistant 통합구성요소
 
-이 유지보수 포크는 [lunDreame의 원본 통합구성요소](https://github.com/lunDreame/kocom-wallpad)를 기반으로 합니다.
-원저작권과 Apache 라이선스는 그대로 유지됩니다.
-
-Home Assistant 2026.8.0 이상이 필요하며, 이는 테스트된 개발 기준과 일치합니다.
-이전 버전의 Home Assistant는 이번 릴리스에서 더 이상 지원하지 않으므로,
-설치 전에 Home Assistant를 먼저 업그레이드해 주세요.
-
-## 기여
-문제가 있나요? [Issues](https://github.com/ninthsword/kocom-wallpad/issues) 탭에 작성해 주세요.
-
-- 더 좋은 아이디어가 있나요? [Pull requests](https://github.com/ninthsword/kocom-wallpad/pulls)로 공유해 주세요!
-- 이 통합을 사용하면서 발생하는 문제에 대해서는 책임지지 않습니다.
-
-도움이 되셨나요? [카카오페이](https://qr.kakaopay.com/FWDWOBBmR) [토스](https://toss.me/lundreamer)
+코콤 월패드의 RS485 상태 보고를 해석하고 지원 기기를 Home Assistant에서 제어하는 유지보수 포크입니다.
+[lunDreame의 원본 통합구성요소](https://github.com/lunDreame/kocom-wallpad)를 기반으로 하며,
+원저작권 표시와 [MIT 라이선스](LICENSE)를 유지합니다. Home Assistant 2026.8.0 이상이 필요합니다.
 
 ## 설치
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ninthsword&repository=kocom-wallpad&category=Integration)
 
-이 통합을 설치하려면 이 GitHub Repo를 HACS Custom Repositories에 추가하거나 위의 배지를 클릭하세요. 설치 후 HomeAssistant를 재부팅하세요.
+[HACS 사용자 지정 저장소](https://my.home-assistant.io/redirect/hacs_repository/?owner=ninthsword&repository=kocom-wallpad&category=Integration)에 이 저장소를 통합구성요소로 추가하고 설치한 뒤 Home Assistant를 재시작하세요.
+설정 → 기기 및 서비스 → 통합구성요소 추가에서 `Kocom Wallpad`를 찾습니다.
 
-1. **기기 및 서비스** 메뉴에서 **통합구성요소 추가하기**를 클릭합니다.
-2. **브랜드 이름 검색** 탭에 `코콤 월패드`을 입력하고 검색 결과에서 클릭합니다.
-3. 아래 설명에 따라 설정을 진행합니다:
-   - 호스트: EW11 장치의 IP 주소
-   - 포트: EW11 장치의 포트 (기본값: 8899)
-4. 설정이 완료된 후, 컴포넌트가 로드되면 생성된 기기를 사용하실 수 있습니다.
+- TCP 연결: RS485 브리지의 호스트와 포트를 입력합니다. 기본 포트는 `8899`입니다.
+- 시리얼 연결: 호스트에 시리얼 장치 경로를 입력합니다. 이 경우 포트는 사용하지 않습니다.
 
-### 준비
-- 기본적인 환경에선 EW11 장치 하나 필요 추가적인 인터폰 제어 시에는 기존 장치 포함 하나 더 필요
-- 인터폰 결선의 경우 [해당](https://blog.oriang.net/45) 링크 참조
+월패드와 통신할 RS485 연결이 필요하며, 기기와 배선에 따라 지원 범위가 다릅니다.
+인터폰 제어는 지원하지 않습니다. 초기 기기 발견에는 해당 기기의 상태 보고가 필요하고,
+일부 기기는 월패드에서 동작시킨 뒤에야 등록됩니다.
 
-## 기능
+## 지원 기능과 제한
 
-| 기기       | 지원  | 속성                           |
-|-----------|------|-------------------------------|
-| 조명 (디밍) | O    |                               |
-| 일괄소등    | O    |                               |
-| 콘센트      | O    |                               |
-| 난방       | O    | 외출 모드                        |
-| 에어컨     | O    |                                |
-| 환기       | O    |                                |
-| 가스       | O    | 잠금만 지원                       |
-| 실내 공기질  | O    |                                |
-| 모션(현관)  | O    |                                |
-| 인터폰      | X    |                                 |
-| 엘리베이터   | O    | 방향, 층수                       |
+| 기기 | 기능 |
+|---|---|
+| 조명 | 켜기·끄기. 밝기 조절은 지원하지 않음 |
+| 일괄소등 | 읽기 전용 상태 센서 |
+| 콘센트 | 켜기·끄기 |
+| 난방 | 희망온도, 난방 켜기·끄기, 외출 모드, 변경 주체 표시 |
+| 에어컨 | 운전 모드, 희망온도, 풍량 |
+| 환기 | 켜기·끄기, 풍량, 보고에서 발견한 모드 |
+| 가스 밸브 | 잠금만 지원 |
+| 실내 공기질·현관 모션 | 상태 센서 |
+| 엘리베이터 | 호출, 방향·층수 보고. 현관 스위치에서 호출해야 발견될 수 있음 |
 
-- **초기 장치 추가 시에는 최초 한번은 장치를 ON/OFF 하셔야 합니다.**
-- 난방: 월패드에 연결될 때마다 알려진 모든 온도조절기에 상태를 물어보고, 응답이 올 때까지 다시 묻습니다. 연결 직후에는 방마다 최대 3번, 그 뒤에는 아직 상태를 모르는 방에만 1분에 한 번 묻습니다. 이 상태 질의 때문에 난방 제어 명령이 늦어지지는 않으며, 방은 그 방의 상태 보고가 실제로 들어올 때까지 알 수 없음으로 표시됩니다.
-- 난방 외출 해제: Home Assistant에서 외출을 풀거나 난방을 켜거나 끌 때, 또는 Home Assistant가 연결된 동안 월패드에서 난방 모드로 외출을 풀 때(통합구성요소가 같은 연결에서 그 방의 외출과 해제를 모두 본 경우), 통합구성요소가 외출 전에 그 방의 외출이 아닌 난방 상태의 희망온도를 본 적이 있으면 희망온도가 외출 전 온도로 돌아갑니다. 월패드에서 외출을 풀면 통합구성요소가 희망온도 명령을 한 번 보내 되돌립니다. 외출 중이 아닐 때 Home Assistant에서 난방을 켜거나 끄면 현재 희망온도를 그대로 유지합니다. 외출 설정/해제와 난방 켜기/끄기 명령은 월패드에 연결된 뒤 그 온도조절기가 상태를 한 번 보고하기 전까지는 거부됩니다. 다음 항목(난방 변경 주체)에 적은 대로 통합구성요소가 보낸 프레임을 되돌려 보내는 어댑터에서는 외출 중 Home Assistant에서 바꾼 설정이 월패드 변경으로 표시되어 이 되돌림이 뒤따를 수 있습니다.
-- 난방 변경 주체: 온도조절기 설정(희망온도, 난방 켜짐/꺼짐, 외출)이 바뀌면 누가 바꿨는지 표시합니다. **통합**은 이 통합구성요소가 보낸 명령이며 로그북에 그 명령을 부른 사람이나 자동화가 함께 표시됩니다. **월패드**는 월패드가 보낸 명령, **단말기**는 앞선 명령 없이 방 온도조절기가 변경을 보고한 경우, **알 수 없음**은 상태 질의의 응답에서만 변경이 보인 경우입니다. 결과는 난방 엔터티의 `변경 주체`와 `변경 시각` 속성과 변경마다 한 줄의 로그북 기록으로 남습니다. 온도조절기 보고 직전 2초 동안의 프레임으로 판단하며, 재시작, 다시 불러오기, 재연결 후에는 새로 시작하므로 Home Assistant가 연결되지 않은 동안의 변경은 표시되지 않습니다. 이 구분은 RS485 어댑터가 통합구성요소가 보낸 프레임을 되돌려 보내지 않는다고 가정합니다(TCP 브리지에서 확인). 되돌려 보내는 어댑터에서는 Home Assistant에서 보낸 변경이 월패드로 표시됩니다.
-- 엘리베이터의 경우 현관 스위치가 있는 경우 현관 스위치에서 호출하셔야 정상적으로 등록됩니다.
-- 기기 지원 및 기타 요청 사항은 [유지보수 이슈 트래커](https://github.com/ninthsword/kocom-wallpad/issues)를 이용해 주세요.
+연결이 끊기면 기기를 사용할 수 없습니다. 복원한 상태는 표시용이며,
+각 기기의 현재 연결에서 실제 상태 보고를 받아야 물리 상태가 확인됩니다.
+난방의 일부 명령은 그 확인 전까지 거부됩니다.
 
-## 디버깅
-- 문제 파악을 위해 아래 코드를 `configuration.yaml` 파일에 추가 후 HomeAssistant를 재시작해 주세요.
-- 디버깅 외에는 활성화하지 마세요.
+난방은 연결마다 알려진 방 중 아직 확인되지 않은 방에 상태를 묻습니다.
+초기에는 방마다 최대 3회 시도한 뒤, 미응답 방에는 60초마다 다시 묻습니다.
+별도로 120초마다 확인된 방을 점검해 마지막 실제 보고가 120초 이상 지난 방에만 상태를 묻습니다.
+질의나 ACK만으로 상태를 확인하지 않으며, 다른 기기 종류에는 이 주기 질의를 보내지 않습니다.
 
-디버깅 관련 문제는 [유지보수 이슈 트래커](https://github.com/ninthsword/kocom-wallpad/issues)를 통해 제보해 주세요.
+난방 외출 해제 시 이전에 확인한 해당 방의 재실 희망온도를 사용합니다.
+같은 연결에서 외출과 난방 모드 복귀를 모두 관찰하고 통합 명령에 의한 복귀가 아닌 경우,
+통합구성요소가 희망온도 복원 명령을 한 번 보낼 수 있습니다. 뒤따른 새 설정이나 재연결은 대기 중 복원을 취소합니다.
+
+난방 설정 변경은 보고 직전 2초의 명령·질의를 기준으로 `통합`, `월패드`, `단말기`, `알 수 없음`으로 표시하고 로그북에 기록합니다.
+상태 질의로만 발견한 변경은 `알 수 없음`이며, 동일한 상태나 현재 온도만 바뀐 보고는 설정 변경으로 기록하지 않습니다.
+통합이 보낸 프레임을 되돌려 보내는 어댑터에서는 통합 명령이 월패드 명령으로 표시될 수 있습니다.
+
+일괄소등은 일반 조명과 별도의 센서로 등록됩니다. 일반 조명의 식별자는 유지합니다.
+이전 버전에서 일괄소등과 조명이 같은 식별자로 등록된 항목은 의미를 자동으로 판별할 수 없어 삭제하거나 이전하지 않습니다.
+업그레이드 후 남은 기존 항목은 실제 상태와 자동화 참조를 확인해 직접 정리하세요.
+일반 조명 명령 뒤에 일괄소등 해제 패킷을 추가로 보내지 않습니다. 특정 모델에 필요한 해제 순서는 확인되지 않았습니다.
+
+환기 모드는 보고에서 발견한 값만 제공합니다. 기존 `air purification` 모드 이름과 서비스 입력은 호환성을 위해 유지합니다.
+
+## 문제 보고와 개발
+
+문제와 제안은 [이슈](https://github.com/ninthsword/kocom-wallpad/issues), 수정은 [Pull requests](https://github.com/ninthsword/kocom-wallpad/pulls)로 보내 주세요.
+디버깅할 때만 다음 로그 설정을 사용하고, 제보 전에 개인 정보와 통신 주소를 제거하세요.
 
 ```yaml
 logger:
@@ -70,155 +68,5 @@ logger:
     custom_components.kocom_wallpad: debug
 ```
 
-## 라이선스
-Kocom WallPad 통합은 [Apache License](./LICENSE)를 따릅니다.
-
-## 개발 검증
-
-Python 3.14.7, uv 0.12.5, Node.js 24를 사용합니다. 해시 잠금된 개발 의존성에는
-Home Assistant 2026.8.0, serialx 1.11.0, Ruff 0.16.4가 포함됩니다.
-Pyright 1.1.413은 `devtools/pyright` 아래에 격리되어 있습니다. 런타임 시리얼 의존성은 테스트된 버전으로 고정되어 있습니다.
-Python 3.11 구문 호환성은 계속 유지되며, 지원하는 Home Assistant 최소 버전은
-2026.8.0입니다.
-
-```sh
-python3 -m pip install uv==0.12.5
-uv venv --python 3.14.7 .venv
-uv pip sync --python .venv/bin/python --require-hashes requirements-dev.lock
-npm ci --prefix devtools/pyright --ignore-scripts --no-audit --no-fund
-devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv/bin/python --outputjson
-.venv/bin/ruff check --no-cache custom_components tests
-.venv/bin/python -B -m unittest discover -s tests -v
-```
-
-Pyright는 로그북 설명 모듈 `logbook.py`를 포함한 15개 통합구성요소 모듈과 오프라인 회귀 테스트 모듈 전체를
-실제 개발 의존성을 기준으로 검사합니다. Config-flow 테스트와 `tests/test_climate_core_compat.py`는 프로토콜 shim과 분리된
-새 서브프로세스에서 실제 Home Assistant로 실행됩니다. 나머지 테스트는 좁은 범위의 Home Assistant shim과 가짜
-트랜스포트를 사용해 네트워크나 실제 장치 접근 없이 패킷 바이트, 확인 응답, 재연결,
-종료 동작을 검증합니다. 또한 `DeviceState` 생성자, 데이터클래스 필드,
-직렬화, 초기에 존재하지 않는 동적 메타데이터도 함께 보호합니다.
-
-의존성을 의도적으로 갱신할 때는 `requirements-dev.in`과 해시로 검증되는
-`requirements-dev.lock`을 항상 함께 갱신하세요. CI는 이 검사들을 실행하고
-런타임 소스를 Python 3.11 구문 규칙으로 파싱합니다. 이 검사들은 통합구성요소를
-Home Assistant에 설치하거나 서비스·장치를 동작시키지 않습니다.
-
-
-## Home Assistant 2026.9 호환성 검증
-
-기존 2026.8 최소 버전 검증은 유지합니다. 2026.9.2 검증은 Python 3.14.7과
-별도 해시 잠금 파일을 사용하며, 실제 서비스나 장치에 연결하지 않습니다.
-`uv==0.12.5`, Node.js 24와 저장소의 잠긴 Pyright 의존성을 사용합니다.
-
-```sh
-uv venv --python 3.14.7 .venv-ha2026.9
-uv pip sync --python .venv-ha2026.9/bin/python --require-hashes requirements-ha2026.9.lock
-npm ci --prefix devtools/pyright --ignore-scripts --no-audit --no-fund
-.venv-ha2026.9/bin/python -B -m unittest discover -s tests -v
-.venv-ha2026.9/bin/python -B -m pytest -p no:cacheprovider --disable-socket --allow-unix-socket -o asyncio_mode=auto tests_ha
-```
-
-가벼운 기존 테스트와 실제 Home Assistant pytest 테스트는 별도 프로세스에서
-실행합니다. 새 pytest 파일은 2026.9 작업에서 명시적으로 타입 검사하며,
-기존 2026.8 환경에 pytest 플러그인을 추가하지 않습니다.
-
-## Home Assistant 2026.10 호환성 검증
-
-기존 검증 환경과 별도로 안정판 Home Assistant 2026.10.0, Python 3.14.7,
-`uv==0.12.5`, Node.js 24를 사용합니다. 새 의존성 입력과 해시 잠금 파일은
-`requirements-ha2026.10.in`, `requirements-ha2026.10.lock`입니다.
-
-테스트 플러그인 `pytest-homeassistant-custom-component==0.13.370`의 메타데이터는
-`homeassistant==2026.10.0b4`를 요구하므로, 단일 코어 버전만 지정한
-`requirements-ha2026.10-overrides.in`으로 안정판을 선택합니다. CI는 설치된
-Python·코어·플러그인 버전을 확인하고 전체 의존성 메타데이터를 검사합니다.
-플러그인의 이 베타 버전 요구와 설치된 안정판 사이의 불일치가 정확히 하나일
-때만 허용하며, 누락된 의존성이나 다른 버전 불일치는 실패로 처리합니다.
-
-의존성 입력을 변경할 때는 같은 도구와 재정의 파일로 잠금을 다시 생성하세요.
-
-```sh
-uv pip compile --python 3.14.7 --generate-hashes --override requirements-ha2026.10-overrides.in requirements-ha2026.10.in -o requirements-ha2026.10.lock
-```
-
-전용 환경에서 `devtools/ha2026_10_typing.py`를 먼저 실행하세요. HA의 런타임
-재노출과 Probatio 별칭을 타입 검사기가 인식하도록, 설치된 소스에서 `.pyi`
-파일 네 개를 생성합니다. 원본 런타임 `.py`와 배포 메타데이터는 해시로
-보호하며, 코어·플러그인·Probatio 버전과 실제 객체의 동일성도 확인합니다.
-다른 가상환경, 예상과 다른 import 구조나 기존 타입 파일은 실패로 처리합니다.
-동일한 생성 결과가 이미 있으면 다시 쓰지 않습니다. 이어지는 가드 테스트는
-임시 파일과 새 프로세스로 실패 조건을 검사합니다. 이 준비는 2026.10 환경에만
-적용되며, 기존 검증 환경과 통합구성요소의 런타임 import는 그대로 유지합니다.
-
-다음 명령은 외부 서비스나 장치에 연결하지 않고, 기존 오프라인 테스트와 실제
-Home Assistant 테스트를 별도 프로세스로 실행합니다. CI는 같은 검사에 위의
-버전 및 메타데이터 검사를 추가합니다.
-
-```sh
-python -m pip install uv==0.12.5
-uv venv --python 3.14.7 .venv-ha2026.10
-uv pip sync --python .venv-ha2026.10/bin/python --require-hashes requirements-ha2026.10.lock
-npm ci --prefix devtools/pyright --ignore-scripts --no-audit --no-fund
-.venv-ha2026.10/bin/python -B devtools/ha2026_10_typing.py
-.venv-ha2026.10/bin/python -B -m unittest discover -s devtools -p test_ha2026_10_typing.py -v
-.venv-ha2026.10/bin/python -B -m pytest --collect-only -p no:cacheprovider --disable-socket --allow-unix-socket -o asyncio_mode=auto tests_ha
-devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python
-devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python tests_ha/conftest.py tests_ha/test_setup_entities.py tests_ha/test_serial_dependency.py tests_ha/test_restore_state.py tests_ha/test_change_source.py tests_ha/test_thermostat_command_target.py
-.venv-ha2026.10/bin/python -B -m unittest discover -s tests -v
-.venv-ha2026.10/bin/python -B -m pytest -p no:cacheprovider --disable-socket --allow-unix-socket -o asyncio_mode=auto tests_ha
-.venv-ha2026.10/bin/ruff check --no-cache custom_components tests tests_ha
-devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.10/bin/python devtools/ha2026_10_typing.py devtools/test_ha2026_10_typing.py
-.venv-ha2026.10/bin/ruff check --no-cache devtools/ha2026_10_typing.py devtools/test_ha2026_10_typing.py
-```
-
-## Home Assistant 2026.11 호환성 검증
-
-기존 검증 환경과 별도로 Home Assistant 2026.11.0, Python 3.14.7, `uv==0.12.5`,
-Node.js 24를 사용합니다. 의존성 입력과 해시 잠금 파일은
-`requirements-ha2026.11.in`, `requirements-ha2026.11.lock`입니다.
-
-CI 작업은 코어 버전 확인, Pyright, `tests` 아래의 unittest, Ruff를 실행합니다.
-`tests_ha`는 Core 2026.11용 테스트 플러그인이 나오면 이 작업에 추가합니다.
-현재 최신 플러그인은 Core 2026.10을 요구하여 2026.11.0에서 시작할 수 없습니다.
-
-```sh
-uv venv --python 3.14.7 .venv-ha2026.11
-uv pip sync --python .venv-ha2026.11/bin/python --require-hashes requirements-ha2026.11.lock
-npm ci --prefix devtools/pyright --ignore-scripts --no-audit --no-fund
-devtools/pyright/node_modules/.bin/pyright --project pyrightconfig.json --pythonpath .venv-ha2026.11/bin/python
-.venv-ha2026.11/bin/python -B -m unittest discover -s tests -v
-.venv-ha2026.11/bin/ruff check --no-cache custom_components tests tests_ha
-```
-
-## 화면 검증
-
-`devtools/ui_check/check.py`는 실제 Home Assistant 2026.10을 Home Assistant 자체
-화면 그대로 실행하고, 실제 월패드 대신 127.0.0.1에서 동작하는 합성 월패드를
-연결합니다. 합성 월패드는 저장소 테스트에 있는 프레임만 보냅니다. 브라우저로
-로그인한 뒤 구성 흐름으로 통합구성요소를 추가하고(포트 오류 메시지 포함), 한국어
-문구와 기기, 엔티티, 해석된 온도 값을 확인하며, 온도조절기 기기 페이지를
-데스크톱과 휴대폰 너비로 열어 각 화면의 스크린샷을 저장합니다.
-
-이 검증은 운영 중인 Home Assistant, 월패드, 장치에 연결하지 않으며 어떤 명령도
-보내지 않습니다. Home Assistant가 합성 월패드에 무엇이든 보내면 검증은 실패합니다.
-네트워크가 필요하지 않지만, 네트워크가 있으면 새로 설치한 Home Assistant와
-마찬가지로 온보딩 과정에서 기본 통합구성요소인 met, radio_browser,
-google_translate가 시작되고 브라우저가 Home Assistant의 브랜드 이미지를 불러오므로
-인터넷에 접속할 수 있습니다.
-
-`requirements-ui.lock`으로 `.venv-ui`를 만들고 Chromium을 설치한 뒤, 실행할 때마다
-`mktemp -d`로 새 디렉터리를 만들어 지정하세요. 이미 파일이 있는 디렉터리는 거부되므로
-고정된 경로는 두 번째 실행에서 실패합니다. 스크린샷, Home Assistant 로그, 합성
-월패드가 받은 내용이 그 디렉터리 아래에 저장됩니다.
-
-```sh
-python -m pip install uv==0.12.5
-uv venv --python 3.14.7 .venv-ui
-uv pip sync --python .venv-ui/bin/python --require-hashes requirements-ui.lock
-.venv-ui/bin/python -m playwright install --with-deps chromium
-out=$(mktemp -d /tmp/kocom-ui-check.XXXXXX)
-.venv-ui/bin/python -B devtools/ui_check/check.py --out "$out/shots"
-```
-
-CI는 `.github/workflows/ui-check.yml`에서 같은 검증을 실행하고, 스크린샷과 로그를
-7일 동안 보관합니다.
+개발 환경, 정확한 검증 명령, 버전별 검사 범위와 합성 화면 검증 방법은 [개발 문서](docs/development.md)에 있습니다.
+런타임 시리얼 의존성은 `serialx>=1.11.0`이며, 개발 잠금 파일은 검증 환경의 버전을 고정합니다.

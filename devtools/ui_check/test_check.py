@@ -376,7 +376,7 @@ class WallpadTest(unittest.TestCase):
             with self.subTest(frame=name):
                 self.assertIn(f'"{frame}"', fixtures)
 
-    def test_frames_decode_into_eighteen_entities(self) -> None:
+    def test_frames_decode_into_nineteen_entities(self) -> None:
         gateway = ControllerGateway()
         controller = KocomController(cast("KocomGateway", gateway))
         for frame in wallpad.FRAMES.values():
@@ -385,7 +385,8 @@ class WallpadTest(unittest.TestCase):
             (state.key.device_type.name, state.key.room_index, state.key.sub_type.name)
             for state in gateway.states
         }
-        self.assertEqual(len(keys), 18)
+        self.assertEqual(len(keys), 19)
+        self.assertIn(("LIGHTCUTOFF", 255, "NONE"), keys)
         self.assertIn(("THERMOSTAT", 1, "NONE"), keys)
         self.assertIn(("AIRQUALITY", 1, "CO2"), keys)
 

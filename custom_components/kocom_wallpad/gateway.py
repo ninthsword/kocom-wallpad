@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any, Literal, cast
 
 from homeassistant.config_entries import ConfigEntry
@@ -24,6 +25,8 @@ from .const import (
     RECV_POLL_SEC,
     SEND_RETRY_GAP,
     SEND_RETRY_MAX,
+    THERMOSTAT_REFRESH_INTERVAL,
+    THERMOSTAT_STALE_AFTER,
     DeviceType,
     SubType,
 )
@@ -40,6 +43,7 @@ class _CmdItem:
     connection_generation: int | None = None
     future: asyncio.Future[bool] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
     context: object | None = None
+    query_intent: Literal["bootstrap", "refresh"] = "bootstrap"
     # Identity of the pending thermostat restore this item belongs to.
     restore: int | None = None
 
@@ -134,6 +138,8 @@ class KocomGateway:
         self._tx_queue: asyncio.Queue[_CmdItem] = asyncio.Queue()
         self._task_reader: asyncio.Task | None = None
         self._task_sender: asyncio.Task | None = None
+        self._task_freshness_queries: asyncio.Task | None = None
+        self._primary_report_times: dict[tuple[int, int, int, int], float] = {}
         self._task_bootstrap_queries: asyncio.Task | None = None
         self._bootstrap_query_tasks: set[asyncio.Task] = set()
         self._pendings: list[_PendingWaiter] = []
@@ -156,6 +162,7 @@ class KocomGateway:
         self._task_reader = asyncio.create_task(self._read_loop())
         self._task_sender = asyncio.create_task(self._sender_loop())
         self._sync_connection_availability()
+        self._task_freshness_queries = asyncio.create_task(self._async_freshness_queries())
 
     async def async_stop(self, event: Event | None = None) -> None:
         LOGGER.info("Stopping gateway - %s:%s", self.host, self.port or "")
@@ -163,6 +170,11 @@ class KocomGateway:
             self._task_reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task_reader
+        if self._task_freshness_queries:
+            self._task_freshness_queries.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task_freshness_queries
+            self._task_freshness_queries = None
         await self._cancel_bootstrap_queries()
         if self._task_sender:
             self._task_sender.cancel()
@@ -211,12 +223,15 @@ class KocomGateway:
         self,
         key: DeviceKey,
         connection_generation: int,
+        *,
+        intent: Literal["bootstrap", "refresh"] = "bootstrap",
     ) -> bool:
         item = _CmdItem(
             key=key,
             action="status_query",
             kwargs={},
             connection_generation=connection_generation,
+            query_intent=intent,
         )
         return await self._async_queue_item(item)
 
@@ -244,6 +259,8 @@ class KocomGateway:
 
     def on_device_state(self, dev: DeviceState) -> None:  
         is_live = not self._restore_mode and self.conn._is_connected()
+        if is_live and self._is_primary_thermostat(dev):
+            self._primary_report_times[dev.key.key] = monotonic()
         availability_changed = False
         if is_live and dev.key.key not in self._live_device_keys:
             self._live_device_keys.add(dev.key.key)
@@ -305,6 +322,7 @@ class KocomGateway:
             # A new socket session must receive a fresh physical report before
             # any restored or previously-live entity is considered available.
             self._live_device_keys.clear()
+            self._primary_report_times.clear()
             self._cancel_bootstrap_queries_soon()
         self._connection_available = connected
         if connected:
@@ -316,6 +334,43 @@ class KocomGateway:
                     self.async_signal_device_updated(dev.key.unique_id),
                     dev,
                 )
+
+    @staticmethod
+    def _is_primary_thermostat(dev: DeviceState) -> bool:
+        key = dev.key
+        return (
+            dev.platform == Platform.CLIMATE
+            and key.device_type == DeviceType.THERMOSTAT
+            and key.device_index == 0
+            and key.sub_type == SubType.NONE
+            and 0x00 <= key.room_index <= 0xFE
+        )
+
+    def _is_stale_thermostat(self, key: DeviceKey) -> bool:
+        dev = self.registry.get(key)
+        received = self._primary_report_times.get(key.key)
+        return (
+            dev is not None
+            and self._is_primary_thermostat(dev)
+            and self.is_device_state_confirmed(key)
+            and received is not None
+            and monotonic() - received >= THERMOSTAT_STALE_AFTER
+        )
+
+    async def _async_refresh_stale_thermostats(self) -> None:
+        """Queue one read for each stale confirmed primary in this connection."""
+        generation = self._connection_generation
+        for dev in self.registry.all_by_platform(Platform.CLIMATE):
+            if not self._is_bootstrap_session(generation):
+                return
+            if self._is_stale_thermostat(dev.key):
+                await self._async_send_status_query(dev.key, generation, intent="refresh")
+
+    async def _async_freshness_queries(self) -> None:
+        """Sweep sequentially without holding the sender for a response."""
+        while True:
+            await asyncio.sleep(THERMOSTAT_REFRESH_INTERVAL)
+            await self._async_refresh_stale_thermostats()
 
     def _schedule_bootstrap_queries(self) -> None:
         """Start one query task per socket session for every known primary thermostat."""
@@ -594,7 +649,11 @@ class KocomGateway:
             not item.future.done()
             and self.conn._is_connected()
             and item.connection_generation == self._connection_generation
-            and not self.is_device_state_confirmed(item.key)
+            and (
+                self._is_stale_thermostat(item.key)
+                if item.query_intent == "refresh"
+                else not self.is_device_state_confirmed(item.key)
+            )
         )
 
     def _is_current_restore(self, item: _CmdItem) -> bool:

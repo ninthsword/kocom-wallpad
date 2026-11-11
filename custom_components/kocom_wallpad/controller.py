@@ -343,13 +343,13 @@ class KocomController:
     def _handle_cutoff_switch(self, frame: PacketFrame) -> DeviceState | None:
         if frame.command in (0x65, 0x66):
             key = DeviceKey(
-                device_type=frame.dev_type,
-                room_index=0,
+                device_type=DeviceType.LIGHTCUTOFF,
+                room_index=255,
                 device_index=0,
                 sub_type=SubType.NONE,
             )
             state = frame.command == 0x65
-            dev = DeviceState(key=key, platform=Platform.LIGHT, attribute={}, state=state)
+            dev = DeviceState(key=key, platform=Platform.BINARY_SENSOR, attribute={}, state=state)
             return dev
 
     def _handle_switch(self, frame: PacketFrame) -> list[DeviceState] | None:
@@ -530,6 +530,14 @@ class KocomController:
             co2_value = (frame.payload[4] * 100) + frame.payload[5]
             error_code = frame.payload[6]
 
+            if preset_mode != "unknown" and preset_mode != "ventilation":
+                if self._device_storage.get("ventil_modes") is None:
+                    LOGGER.debug("New ventilation preset detected (excluding default).")
+                    self._device_storage["ventil_feature"] = True
+                    self._device_storage["ventil_modes"] = ["ventilation"]
+                if preset_mode not in self._device_storage["ventil_modes"]:
+                    LOGGER.debug(f"Added presets: {preset_mode}")
+                    self._device_storage["ventil_modes"].append(preset_mode)
             attribute = {
                 "feature_preset": self._device_storage.get("ventil_feature", False),
                 "preset_modes": self._device_storage.get("ventil_modes", []),
@@ -540,14 +548,6 @@ class KocomController:
                 "preset_mode": preset_mode,
                 "speed": speed,
             }
-            if preset_mode != "unknown" and preset_mode != "ventilation":
-                if self._device_storage.get("ventil_modes") is None:
-                    LOGGER.debug("New ventilation preset detected (excluding default).")
-                    self._device_storage["ventil_feature"] = True
-                    self._device_storage["ventil_modes"] = ["ventilation"]
-                if preset_mode not in self._device_storage["ventil_modes"]:
-                    LOGGER.debug(f"Added presets: {preset_mode}")
-                    self._device_storage["ventil_modes"].append(preset_mode)
             dev = DeviceState(key=key, platform=Platform.FAN, attribute=attribute, state=state)
             states.append(dev)
             
@@ -788,6 +788,9 @@ class KocomController:
     def generate_command(self, key: DeviceKey, action: str, **kwargs) -> tuple[bytes, Predicate, float]:
         device_type = key.device_type
         room_index = key.room_index
+
+        if device_type == DeviceType.LIGHTCUTOFF or (device_type == DeviceType.LIGHT and room_index == 255):
+            raise ValueError("일괄소등은 읽기 전용입니다")
 
         if device_type not in REV_DT_MAP:
             raise ValueError(f"Invalid device type: {device_type}")

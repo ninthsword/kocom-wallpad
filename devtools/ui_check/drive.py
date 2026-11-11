@@ -19,12 +19,12 @@ USER, PASSWORD = "verifier", "synthetic-pass-123"
 HOST = "127.0.0.1"
 PARENT = "Kocom Wallpad"
 THERMOSTAT = "KOCOM THERMOSTAT"
-DEVICES = (PARENT, THERMOSTAT, "KOCOM AIRCONDITIONER", "KOCOM", "KOCOM AIRQUALITY")
+DEVICES = (PARENT, THERMOSTAT, "KOCOM AIRCONDITIONER", "KOCOM", "KOCOM AIRQUALITY", "KOCOM LIGHT")
 THERMOSTAT_ENTITIES = ("난방 0-0", "난방 1-0", "보일러 오류코드 0-0", "보일러 오류코드 1-0")
 # The captured thermostat reports carry a current temperature of 20 degrees (wallpad.py).
 CURRENT_TEMPERATURE = re.compile(r"현재 온도: ?20 ?°C")
-ENTITY_COUNT = 18
-LISTED_ENTITIES = ("엘리베이터 0-0", "움직임 감지기(현관) 0-0", "환기 0-0", "환기 CO2 0-0", "에어컨 2-0")
+ENTITY_COUNT = 19
+LISTED_ENTITIES = ("엘리베이터 0-0", "움직임 감지기(현관) 0-0", "환기 0-0", "환기 CO2 0-0", "에어컨 2-0", "일괄소등 255-0")
 PORT_ERROR = "TCP 포트는 1부터 65535 사이의 값으로 입력하세요."
 SEARCH = "공기질"
 UNRELATED_ROW = "난방 1-0"  # visible in the entity list until the search filters it out
@@ -243,6 +243,44 @@ def steps(page: Page, base: str, shots: Shots, wallpad_port: int) -> None:
     see_text(page, f"{SEARCH} CO2 1-0", "entity search", exact=True)
     unseen(page.get_by_text(UNRELATED_ROW, exact=True), UNRELATED_ROW, "entity search")
     shots.take(page, "12-entity-search")
+
+
+    page.goto(base + "/config/devices/dashboard")
+    page.get_by_text("KOCOM", exact=True).filter(visible=True).first.click()
+    page.get_by_text("환기 0-0", exact=True).filter(visible=True).first.click()
+    fan = page.locator("ha-more-info-dialog")
+    fan_dialog = page.get_by_role("dialog").filter(visible=True).last
+    see(fan_dialog, "환기", "fan more-info")
+    selector = fan.get_by_role("button", name=re.compile("모드"))
+    see(selector, "모드", "fan preset selector")
+    for viewport, name in ((DESKTOP, "13-fan-1440"), (PHONE, "14-fan-390")):
+        page.set_viewport_size(viewport)
+        selector.focus()
+        selector.press("Enter")
+        see_text(page, "자동", "fan preset options", exact=True)
+        see_text(page, "환기", "fan preset options", exact=True)
+        shots.take(page, name)
+        page.keyboard.press("Escape")
+        expect(selector).to_be_focused()
+    page.keyboard.press("Escape")
+    expect(fan_dialog).not_to_be_visible()
+
+    page.set_viewport_size(DESKTOP)
+    page.goto(base + "/config/devices/dashboard")
+    page.get_by_text("KOCOM LIGHT", exact=True).filter(visible=True).first.click()
+    page.get_by_text("일괄소등 255-0", exact=True).filter(visible=True).first.click()
+    cutoff = page.locator("ha-more-info-dialog")
+    cutoff_dialog = page.get_by_role("dialog").filter(visible=True).last
+    see(cutoff_dialog, "일괄소등", "cutoff more-info")
+    for viewport, name in ((DESKTOP, "15-cutoff-1440"), (PHONE, "16-cutoff-390")):
+        page.set_viewport_size(viewport)
+        see_text(page, "일괄소등", "cutoff more-info")
+        for role in ("switch", "slider", "combobox"):
+            expect(cutoff.get_by_role(role)).to_have_count(0)
+        expect(cutoff.get_by_role("button", name=re.compile("켜기|끄기|토글"))).to_have_count(0)
+        shots.take(page, name)
+    page.keyboard.press("Escape")
+    expect(cutoff_dialog).not_to_be_visible()
 
 
 def run(base: str, out: Path, wallpad_port: int) -> None:

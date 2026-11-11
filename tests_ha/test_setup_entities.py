@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from homeassistant.components.fan import FanEntityFeature
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.helpers import device_registry as dr
@@ -13,6 +14,7 @@ from custom_components.kocom_wallpad.const import DOMAIN, DeviceType, SubType
 from custom_components.kocom_wallpad.gateway import KocomGateway
 from custom_components.kocom_wallpad.light import KocomLight
 from custom_components.kocom_wallpad.models import DeviceKey, DeviceState
+from custom_components.kocom_wallpad.transport import AsyncConnection
 
 
 @pytest.mark.asyncio
@@ -66,3 +68,51 @@ async def test_gateway_registry_identity_and_reload(hass):
         await hass.async_block_till_done()
         assert entry.entry_id not in hass.data[DOMAIN]
         assert stop.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_mode", [0x00, 0x02])
+async def test_fan_first_and_later_known_presets_reach_real_consumer(hass, first_mode):
+    entry = MockConfigEntry(domain=DOMAIN, data={"host": "wallpad.invalid", "port": 8899})
+    entry.add_to_hass(hass)
+
+    def report(mode):
+        packet = bytearray.fromhex("aa5530bc0001004800001102800007230200f40d0d")
+        packet[11] = mode
+        packet[18] = sum(packet[2:18]) % 256
+        return bytes(packet)
+
+    async def start(gateway):
+        gateway.controller.feed(report(first_mode))
+
+    with (
+        patch.object(KocomGateway, "async_start", start),
+        patch.object(KocomGateway, "async_stop", new=AsyncMock()),
+        patch.object(KocomGateway, "async_get_entity_registry", new=AsyncMock()),
+        patch.object(AsyncConnection, "_is_connected", return_value=True),
+        patch.object(AsyncConnection, "send", new=AsyncMock()) as send,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        gateway = hass.data[DOMAIN][entry.entry_id]
+        key = DeviceKey(DeviceType.VENTILATION, 0, 0, SubType.NONE)
+        entity_id = er.async_get(hass).async_get_entity_id("fan", DOMAIN, f"{key.unique_id}:wallpad.invalid")
+        assert entity_id is not None
+        before = hass.states.get(entity_id)
+        assert before is not None and before.state == "on"
+        original_flags = before.attributes["supported_features"]
+        assert bool(original_flags & FanEntityFeature.PRESET_MODE) == (first_mode == 0x02)
+        if first_mode == 0x02:
+            assert before.attributes["preset_modes"] == ["ventilation", "auto"]
+        for mode, token in ((0x02, "auto"), (0x08, "air purification")):
+            gateway.controller.feed(report(mode))
+            await hass.async_block_till_done()
+            state = hass.states.get(entity_id)
+            assert state is not None and state.state == "on"
+            assert state.attributes["preset_mode"] == token
+            assert token in state.attributes["preset_modes"]
+            assert state.attributes["supported_features"] == original_flags | FanEntityFeature.PRESET_MODE
+            assert state.attributes["percentage"] == before.attributes["percentage"]
+        send.assert_not_awaited()
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()

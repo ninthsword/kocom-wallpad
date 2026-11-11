@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import asdict, fields
 from enum import Enum, IntFlag
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, create_autospec, patch
+from unittest.mock import AsyncMock, Mock, call, create_autospec, patch
 
 
 def _module(name: str) -> types.ModuleType:
@@ -442,6 +442,8 @@ class ControllerSafetyTests(unittest.TestCase):
 # Literal protocol fixtures specify the existing decoder contract, independent of
 # command generation. These synthetic reports are not physical-device captures.
 _REPORTS = {
+    # Synthetic cutoff report using the existing 0x0EFF/0x65 wire format.
+    "cutoff_on": "aa5530bc0001000eff6500000000000000005f0d0d",
     "ac_on": "aa5530bc000100390200100003001a1600006b0d0d",
     "ac_off": "aa5530bc000100390200000001001b1800005c0d0d",
     "vent_on": "aa5530bc0001004800001102800007230200f40d0d",
@@ -453,6 +455,12 @@ _REPORTS = {
     "airquality_status": "aa5530bc00010098010023110258012c19328c0d0d",
     "airquality_query": "aa5530bc00010098013a050003200000001e060d0d",
 }
+
+
+def _light_report(room: int, values: bytes) -> bytes:
+    """Return a synthetic ordinary light status report."""
+    body = bytes((0x30, 0xBC, 0, 1, 0, 0x0E, room, 0)) + values
+    return b"\xaa\x55" + body + bytes((sum(body) % 256, 13, 13))
 
 
 _HEAT, _OFF = 0x11, 0x00
@@ -688,6 +696,42 @@ class ProtocolFixtureTests(unittest.TestCase):
         self.assertEqual(DeviceKey(device_type, room, 0, subtype), state.key)
         self.assertEqual(platform, state.platform)
 
+    def test_cutoff_report_has_separate_readonly_identity(self):
+        states = self.report("cutoff_on")
+        self.assertEqual(1, len(states))
+        self.assert_device(states[0], DeviceType.LIGHTCUTOFF, 255, SubType.NONE, Platform.BINARY_SENSOR)
+        self.assertIs(states[0].state, True)
+
+    def test_cutoff_does_not_change_normal_light_state_or_confirmation(self):
+        self.controller.feed(_light_report(0, bytes((0, 255, 0, 0, 0, 0, 0, 0))))
+        lights = list(self.states)
+        for state in lights:
+            self.gateway.registry.states[state.key.key] = state
+        cutoff = self.report("cutoff_on")[0]
+        self.gateway.registry.states[cutoff.key.key] = cutoff
+        key = DeviceKey(DeviceType.LIGHT, 0, 0, SubType.NONE)
+        packet, predicate, _ = self.controller.generate_command(key, "turn_on")
+        self.assertEqual("1-0_0-0", key.unique_id)
+        self.assertEqual("2-255_0-0", cutoff.key.unique_id)
+        self.assertEqual(bytes((255, 255, 0, 0, 0, 0, 0, 0)), packet[10:18])
+        self.assertFalse(predicate(cutoff))
+        normal = self.gateway.registry.get(key)
+        assert normal is not None
+        self.assertIs(normal.state, False)
+        self.assertEqual(8, len(lights))
+        for device_type in (DeviceType.LIGHTCUTOFF, DeviceType.LIGHT):
+            for action in ("turn_on", "turn_off", "status_query"):
+                with self.subTest(device_type=device_type, action=action), self.assertRaises(ValueError):
+                    self.controller.generate_command(DeviceKey(device_type, 255, 0, SubType.NONE), action)
+
+    def test_all_ventilation_tokens_keep_their_encoding(self):
+        key = DeviceKey(DeviceType.VENTILATION, 0, 0, SubType.NONE)
+        for token, value in (("unknown", 0), ("ventilation", 1), ("auto", 2),
+                             ("bypass", 3), ("sleep", 5), ("air purification", 8)):
+            with self.subTest(token=token):
+                packet, _, _ = self.controller.generate_command(key, "set_preset", preset_mode=token)
+                self.assertEqual(value, packet[11])
+
     def test_consecutive_airconditioner_reports_replace_values(self):
         for name, expected in (
             ("ac_on", {"hvac_mode": "cool", "fan_mode": "high", "current_temp": 26.0, "target_temp": 22.0}),
@@ -723,7 +767,7 @@ class ProtocolFixtureTests(unittest.TestCase):
             self.assert_device(states[2], DeviceType.VENTILATION, 0, SubType.ERRCODE, Platform.BINARY_SENSOR)
             self.assertIs(error, states[2].state)
             self.assertEqual("problem", states[2].attribute["device_class"])
-        self.assertFalse(first[0].attribute["feature_preset"])
+        self.assertTrue(first[0].attribute["feature_preset"])
         self.assertTrue(second[0].attribute["feature_preset"])
         self.assertEqual(["ventilation", "auto"], second[0].attribute["preset_modes"])
         self.assertEqual({"error_code": "02"}, first[2].attribute["extra_state"])
@@ -1087,6 +1131,133 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             await self.gateway.async_get_entity_registry()
+
+    async def test_cutoff_cannot_confirm_light_and_normal_success_sends_no_release(self):
+        self.gateway.controller.feed(_light_report(0, bytes(8)))
+        self.gateway.controller.feed(bytes.fromhex(_REPORTS["cutoff_on"]))
+        key = DeviceKey(DeviceType.LIGHT, 0, 0, SubType.NONE)
+        waiter = self.gateway._register_confirmation(key, lambda dev: dev.state is True)
+        self.gateway.controller.feed(bytes.fromhex(_REPORTS["cutoff_on"]))
+        self.assertFalse(waiter.future.done())
+        self.gateway._pendings.remove(waiter)
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+        for action in ("turn_on", "turn_off"):
+            value = 255 if action == "turn_on" else 0
+            self.connection.on_send = lambda _packet, value=value: self.gateway.controller.feed(
+                _light_report(0, bytes((value, 0, 0, 0, 0, 0, 0, 0)))
+            )
+            self.assertTrue(await self.gateway.async_send_action(key, action))
+        self.assertEqual(2, len(self.connection.sent))
+        self.assertTrue(all(packet[5:7] == b"\x0e\x00" for packet in self.connection.sent))
+
+    async def test_equal_live_reports_refresh_age_but_restore_and_invalid_reports_do_not(self):
+        key = self._thermostat_state(1).key
+        with patch.object(gateway_module, "monotonic", return_value=100.0) as clock:
+            self._live_report(1)
+            self.assertEqual(100.0, self.gateway._primary_report_times[key.key])
+            clock.return_value = 200.0
+            self._live_report(1)
+            self.assertEqual(200.0, self.gateway._primary_report_times[key.key])
+            self.gateway._restore_mode = True
+            self._live_report(1)
+            self.gateway._restore_mode = False
+            invalid = bytearray(_thermostat_frame(21, 20).raw)
+            invalid[18] ^= 1
+            clock.return_value = 400.0
+            self.gateway.controller.feed(bytes(invalid))
+            self.gateway.controller.feed(_thermostat_frame(21, 20, mirrored=True).raw)
+            self.assertEqual(200.0, self.gateway._primary_report_times[key.key])
+            self.assertTrue(self.gateway._is_stale_thermostat(key))
+        self.gateway._connection_available = True
+        self.connection.connected = False
+        self.gateway._sync_connection_availability()
+        self.assertEqual({}, self.gateway._primary_report_times)
+
+    async def test_freshness_queries_only_stale_confirmed_primary_rooms(self):
+        self.gateway._connection_generation = 3
+        with patch.object(gateway_module, "monotonic", return_value=100.0) as clock:
+            for room in (1, 2):
+                self._live_report(room)
+            clock.return_value = 219.9
+            await self.gateway._async_refresh_stale_thermostats()
+            self.assertTrue(self.gateway._tx_queue.empty())
+            clock.return_value = 220.0
+            self.gateway._primary_report_times[self._thermostat_state(2).key.key] = 219.0
+            unknown = self._thermostat_state(3)
+            self.gateway.registry.upsert(unknown)
+            virtual = self._thermostat_state(255)
+            self.gateway.on_device_state(virtual)
+            nonprimary = DeviceState(DeviceKey(DeviceType.THERMOSTAT, 4, 1, SubType.NONE), Platform.CLIMATE, {}, {})
+            self.gateway.on_device_state(nonprimary)
+            self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+            await self.gateway._async_refresh_stale_thermostats()
+            self.assertEqual(1, len(self.connection.sent))
+            self.assertEqual(bytes.fromhex("360101003a"), self.connection.sent[0][5:10])
+            self.assertEqual(0x3A, self.connection.sent[0][9])
+            self.assertEqual([], self.gateway._pendings)
+            self.connection.connected = False
+            await self.gateway._async_refresh_stale_thermostats()
+            self.assertEqual(1, len(self.connection.sent))
+
+    async def test_refresh_rechecks_age_confirmation_epoch_and_cancellation(self):
+        self.gateway._connection_generation = 1
+        state = self._thermostat_state(1)
+        self.gateway.on_device_state(state)
+        self.gateway._primary_report_times[state.key.key] = 0.0
+        with patch.object(gateway_module, "monotonic", return_value=200.0):
+            item = _CmdItem(state.key, "status_query", {}, connection_generation=1, query_intent="refresh")
+            self.assertTrue(self.gateway._is_current_status_query(item))
+            self.gateway._connection_generation = 2
+            self.assertFalse(self.gateway._is_current_status_query(item))
+            self.gateway._connection_generation = 1
+            self.gateway._live_device_keys.clear()
+            self.assertFalse(self.gateway._is_current_status_query(item))
+            self.gateway.on_device_state(state)
+            self.assertFalse(self.gateway._is_current_status_query(item))
+            self.gateway._primary_report_times[state.key.key] = 0.0
+            item.future.cancel()
+            self.assertFalse(self.gateway._is_current_status_query(item))
+            bootstrap = _CmdItem(state.key, "status_query", {}, connection_generation=1)
+            self.assertFalse(self.gateway._is_current_status_query(bootstrap))
+
+    async def test_live_report_while_refresh_waits_for_idle_suppresses_send(self):
+        self.gateway.on_device_state(self._thermostat_state(1))
+        self.gateway._primary_report_times[self._thermostat_state(1).key.key] = 0.0
+        self.connection.idle = False
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+        with patch.object(gateway_module, "monotonic", return_value=200.0):
+            refresh = asyncio.create_task(self.gateway._async_refresh_stale_thermostats())
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if self.gateway._active_item is not None:
+                    break
+            self._live_report(1)
+            await asyncio.wait_for(refresh, 0.2)
+        self.assertEqual([], self.connection.sent)
+        await asyncio.wait_for(self.gateway._tx_queue.join(), 0.2)
+
+    async def test_freshness_timer_sweeps_every_120_seconds(self):
+        with (
+            patch.object(gateway_module.asyncio, "sleep", new=AsyncMock(side_effect=[None, asyncio.CancelledError])) as sleep,
+            patch.object(self.gateway, "_async_refresh_stale_thermostats", new=AsyncMock()) as sweep,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.gateway._async_freshness_queries()
+        self.assertEqual([call(120.0), call(120.0)], sleep.await_args_list)
+        sweep.assert_awaited_once_with()
+
+    async def test_stop_cancels_freshness_wait_and_settles_queue(self):
+        self.gateway.on_device_state(self._thermostat_state(1))
+        self.gateway._primary_report_times[self._thermostat_state(1).key.key] = 0.0
+        task = asyncio.create_task(self.gateway._async_refresh_stale_thermostats())
+        self.gateway._task_freshness_queries = task
+        await asyncio.sleep(0)
+        self.assertEqual(1, self.gateway._tx_queue.qsize())
+        await self.gateway.async_stop()
+        self.assertTrue(task.cancelled())
+        self.assertIsNone(self.gateway._task_freshness_queries)
+        await asyncio.wait_for(self.gateway._tx_queue.join(), 0.2)
+        self.assertEqual([], self.connection.sent)
 
     async def test_waiter_is_registered_before_same_turn_reply(self):
         self.connection.on_send = lambda _packet: self.gateway.on_device_state(self._state(True))
