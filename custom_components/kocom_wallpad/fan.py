@@ -65,6 +65,15 @@ class KocomFan(KocomBaseEntity, FanEntity):  # pyright: ignore[reportIncompatibl
         if device.attribute["feature_preset"]:
             self._attr_supported_features |= FanEntityFeature.PRESET_MODE
 
+    @callback
+    def update_from_state(self) -> None:
+        """Refresh only preset support when a later report discovers modes."""
+        if self._device.attribute["feature_preset"]:
+            self._attr_supported_features |= FanEntityFeature.PRESET_MODE
+        else:
+            self._attr_supported_features &= ~FanEntityFeature.PRESET_MODE
+        super().update_from_state()
+
     @property
     def is_on(self) -> bool:
         return self._device.state["state"]

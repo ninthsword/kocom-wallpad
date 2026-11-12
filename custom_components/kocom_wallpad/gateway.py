@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any, Literal, cast
 
 from homeassistant.config_entries import ConfigEntry
@@ -18,12 +19,15 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from .const import (
     BOOTSTRAP_REQUERY_INTERVAL,
     CMD_CONFIRM_TIMEOUT,
+    CONF_CUTOFF_RELEASE_AFTER_LIGHT,
     DOMAIN,
     IDLE_GAP_SEC,
     LOGGER,
     RECV_POLL_SEC,
     SEND_RETRY_GAP,
     SEND_RETRY_MAX,
+    THERMOSTAT_REFRESH_INTERVAL,
+    THERMOSTAT_STALE_AFTER,
     DeviceType,
     SubType,
 )
@@ -40,6 +44,7 @@ class _CmdItem:
     connection_generation: int | None = None
     future: asyncio.Future[bool] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
     context: object | None = None
+    query_intent: Literal["bootstrap", "refresh"] = "bootstrap"
     # Identity of the pending thermostat restore this item belongs to.
     restore: int | None = None
 
@@ -134,6 +139,8 @@ class KocomGateway:
         self._tx_queue: asyncio.Queue[_CmdItem] = asyncio.Queue()
         self._task_reader: asyncio.Task | None = None
         self._task_sender: asyncio.Task | None = None
+        self._task_freshness_queries: asyncio.Task | None = None
+        self._primary_report_times: dict[tuple[int, int, int, int], float] = {}
         self._task_bootstrap_queries: asyncio.Task | None = None
         self._bootstrap_query_tasks: set[asyncio.Task] = set()
         self._pendings: list[_PendingWaiter] = []
@@ -143,12 +150,14 @@ class KocomGateway:
         self._force_register_uid: str | None = None
         self._live_device_keys: set[tuple[int, int, int, int]] = set()
         self._active_item: _CmdItem | None = None
+        self._stopping = False
         self._connection_available: bool = False
         self._connection_generation: int = 0
         self._bootstrap_scheduled_generation: int | None = None
         self._bootstrap_registry_keys: set[DeviceKey] = set()
 
     async def async_start(self) -> None:
+        self._stopping = False
         LOGGER.info("Starting gateway - %s:%s", self.host, self.port or "")
         await self.conn.open()
         self._last_rx_monotonic = self.conn.idle_since()
@@ -156,13 +165,20 @@ class KocomGateway:
         self._task_reader = asyncio.create_task(self._read_loop())
         self._task_sender = asyncio.create_task(self._sender_loop())
         self._sync_connection_availability()
+        self._task_freshness_queries = asyncio.create_task(self._async_freshness_queries())
 
     async def async_stop(self, event: Event | None = None) -> None:
+        self._stopping = True
         LOGGER.info("Stopping gateway - %s:%s", self.host, self.port or "")
         if self._task_reader:
             self._task_reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task_reader
+        if self._task_freshness_queries:
+            self._task_freshness_queries.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task_freshness_queries
+            self._task_freshness_queries = None
         await self._cancel_bootstrap_queries()
         if self._task_sender:
             self._task_sender.cancel()
@@ -204,19 +220,25 @@ class KocomGateway:
         context: object | None = None,
         **kwargs,
     ) -> bool:
-        item = _CmdItem(key=key, action=action, kwargs=kwargs, context=context)
+        item = _CmdItem(
+            key=key, action=action, kwargs=kwargs, context=context,
+            connection_generation=self._connection_generation,
+        )
         return await self._async_queue_item(item)
 
     async def _async_send_status_query(
         self,
         key: DeviceKey,
         connection_generation: int,
+        *,
+        intent: Literal["bootstrap", "refresh"] = "bootstrap",
     ) -> bool:
         item = _CmdItem(
             key=key,
             action="status_query",
             kwargs={},
             connection_generation=connection_generation,
+            query_intent=intent,
         )
         return await self._async_queue_item(item)
 
@@ -244,6 +266,8 @@ class KocomGateway:
 
     def on_device_state(self, dev: DeviceState) -> None:  
         is_live = not self._restore_mode and self.conn._is_connected()
+        if is_live and self._is_primary_thermostat(dev):
+            self._primary_report_times[dev.key.key] = monotonic()
         availability_changed = False
         if is_live and dev.key.key not in self._live_device_keys:
             self._live_device_keys.add(dev.key.key)
@@ -300,11 +324,13 @@ class KocomGateway:
         if connected == self._connection_available:
             return
         self._connection_generation += 1
+        self._resolve_pending(False)
         self.controller.clear_change_record()
         if self._connection_available and not connected:
             # A new socket session must receive a fresh physical report before
             # any restored or previously-live entity is considered available.
             self._live_device_keys.clear()
+            self._primary_report_times.clear()
             self._cancel_bootstrap_queries_soon()
         self._connection_available = connected
         if connected:
@@ -316,6 +342,43 @@ class KocomGateway:
                     self.async_signal_device_updated(dev.key.unique_id),
                     dev,
                 )
+
+    @staticmethod
+    def _is_primary_thermostat(dev: DeviceState) -> bool:
+        key = dev.key
+        return (
+            dev.platform == Platform.CLIMATE
+            and key.device_type == DeviceType.THERMOSTAT
+            and key.device_index == 0
+            and key.sub_type == SubType.NONE
+            and 0x00 <= key.room_index <= 0xFE
+        )
+
+    def _is_stale_thermostat(self, key: DeviceKey) -> bool:
+        dev = self.registry.get(key)
+        received = self._primary_report_times.get(key.key)
+        return (
+            dev is not None
+            and self._is_primary_thermostat(dev)
+            and self.is_device_state_confirmed(key)
+            and received is not None
+            and monotonic() - received >= THERMOSTAT_STALE_AFTER
+        )
+
+    async def _async_refresh_stale_thermostats(self) -> None:
+        """Queue one read for each stale confirmed primary in this connection."""
+        generation = self._connection_generation
+        for dev in self.registry.all_by_platform(Platform.CLIMATE):
+            if not self._is_bootstrap_session(generation):
+                return
+            if self._is_stale_thermostat(dev.key):
+                await self._async_send_status_query(dev.key, generation, intent="refresh")
+
+    async def _async_freshness_queries(self) -> None:
+        """Sweep sequentially without holding the sender for a response."""
+        while True:
+            await asyncio.sleep(THERMOSTAT_REFRESH_INTERVAL)
+            await self._async_refresh_stale_thermostats()
 
     def _schedule_bootstrap_queries(self) -> None:
         """Start one query task per socket session for every known primary thermostat."""
@@ -594,7 +657,11 @@ class KocomGateway:
             not item.future.done()
             and self.conn._is_connected()
             and item.connection_generation == self._connection_generation
-            and not self.is_device_state_confirmed(item.key)
+            and (
+                self._is_stale_thermostat(item.key)
+                if item.query_intent == "refresh"
+                else not self.is_device_state_confirmed(item.key)
+            )
         )
 
     def _is_current_restore(self, item: _CmdItem) -> bool:
@@ -607,28 +674,79 @@ class KocomGateway:
             and self.controller.is_restore_pending(item.key.room_index, item.restore)
         )
 
+    def _is_current_action(self, item: _CmdItem) -> bool:
+        """Keep an ordinary command within its original caller and connection."""
+        return (
+            not item.future.done()
+            and not self._stopping
+            and self.conn._is_connected()
+            and item.connection_generation == self._connection_generation
+            and (item.restore is None or self._is_current_restore(item))
+        )
+
+    async def _async_cutoff_release(self, item: _CmdItem, generation: int) -> None:
+        """Optionally supplement a confirmed light command in the serialized sender."""
+        cutoff_key = DeviceKey(DeviceType.LIGHTCUTOFF, 255, 0, SubType.NONE)
+
+        def eligible() -> bool:
+            cutoff = self.registry.get(cutoff_key)
+            return (
+                item.key.device_type == DeviceType.LIGHT
+                and item.key.room_index != 255
+                and item.action in ("turn_on", "turn_off")
+                and self.entry.data.get(CONF_CUTOFF_RELEASE_AFTER_LIGHT) is True
+                and not item.future.done()
+                and not self._stopping
+                and self.conn._is_connected()
+                and self._connection_generation == generation
+                and self.is_device_state_confirmed(cutoff_key)
+                and cutoff is not None
+                and cutoff.state is False
+            )
+
+        if not eligible():
+            return
+        await asyncio.sleep(1.0)
+        if not eligible():
+            return
+        start = asyncio.get_running_loop().time()
+        while not self.is_idle():
+            if not eligible() or asyncio.get_running_loop().time() - start >= 1.0:
+                return
+            await asyncio.sleep(0.01)
+        # This is the existing fork's model-specific recipe, not a status update.
+        body = bytes((0x30, 0x9C, 0x00, 0x0E, 0xFF, 0x01, 0x00, 0x66)) + b"\xff" * 8
+        packet = b"\xaa\x55" + body + bytes((sum(body) & 0xFF, 0x0D, 0x0D))
+        try:
+            if eligible() and self.is_idle():
+                self.controller.note_transmitted(packet, cutoff_release=True)
+                await self.conn.send(packet)
+                self._last_tx_monotonic = asyncio.get_running_loop().time()
+        except (OSError, RuntimeError, TimeoutError) as err:
+            LOGGER.warning("일괄소등 해제 추가 송신에 실패했습니다: %s", err)
+
     async def _sender_loop(self) -> None:
         LOGGER.debug("Starting sender loop")
         try:
             while True:
                 item = await self._tx_queue.get()
                 self._active_item = item
+                acknowledged = False
+                waiter: _PendingWaiter | None = None
                 try:
                     if item is None or item.future.done():
                         continue
 
-                    # Generate the packet and its confirmation predicate.
-                    try:
-                        packet, expect_predicate, timeout = self.controller.generate_command(
-                            item.key, item.action, **item.kwargs
-                        )
-                    except (KeyError, RuntimeError, TypeError, ValueError):
-                        LOGGER.exception("generate_command failed")
-                        if not item.future.done():
-                            item.future.set_result(False)
-                        continue
-
                     if item.action == "status_query":
+                        try:
+                            packet, _, _ = self.controller.generate_command(
+                                item.key, item.action, **item.kwargs
+                            )
+                        except (KeyError, RuntimeError, TypeError, ValueError):
+                            LOGGER.exception("상태 조회 패킷을 생성하지 못했습니다")
+                            if not item.future.done():
+                                item.future.set_result(False)
+                            continue
                         success = False
                         if self._is_current_status_query(item):
                             try:
@@ -652,9 +770,13 @@ class KocomGateway:
 
                     success = False
                     for attempt in range(1, SEND_RETRY_MAX + 1):
+                        if not self._is_current_action(item):
+                            break
                         LOGGER.debug("TX idle wait (max 1.0s) before '%s'...", item.action)
                         t0 = asyncio.get_running_loop().time()
                         while not self.is_idle():
+                            if not self._is_current_action(item):
+                                break
                             await asyncio.sleep(0.01)
                             if asyncio.get_running_loop().time() - t0 > 1.0:
                                 LOGGER.debug(
@@ -663,12 +785,16 @@ class KocomGateway:
                                 )
                                 break
 
-                        if item.restore is not None and not self._is_current_restore(item):
-                            LOGGER.debug("Thermostat restore for %s is no longer current", item.key)
+                        if not self._is_current_action(item):
                             break
 
-                        if not self.conn._is_connected():
-                            LOGGER.warning("Connection not ready. '%s' abort.", item.action)
+                        # Refresh state-dependent bytes after admission on every attempt.
+                        try:
+                            packet, expect_predicate, timeout = self.controller.generate_command(
+                                item.key, item.action, **item.kwargs
+                            )
+                        except (KeyError, RuntimeError, TypeError, ValueError):
+                            LOGGER.exception("명령 패킷을 생성하지 못했습니다")
                             break
 
                         # Register before sending: a wallpad can acknowledge in
@@ -680,6 +806,10 @@ class KocomGateway:
                         self.controller.note_transmitted(packet, item.context)
                         try:
                             await self.conn.send(packet)
+                        except asyncio.CancelledError:
+                            if waiter in self._pendings:
+                                self._pendings.remove(waiter)
+                            raise
                         except (OSError, RuntimeError, TimeoutError) as err:
                             if waiter in self._pendings:
                                 self._pendings.remove(waiter)
@@ -692,13 +822,19 @@ class KocomGateway:
                         self._last_tx_monotonic = asyncio.get_running_loop().time()
 
                         try:
-                            await self._wait_for_confirmation(waiter, timeout)
-                            LOGGER.debug(
-                                "Command '%s' confirmed (attempt %d).",
-                                item.action,
-                                attempt,
+                            confirmation = await self._wait_for_confirmation(waiter, timeout)
+                            acknowledged = (
+                                isinstance(confirmation, DeviceState)
+                                and confirmation.key == item.key
+                                and expect_predicate(confirmation)
                             )
-                            success = True
+                            if acknowledged:
+                                LOGGER.debug(
+                                    "명령 '%s' 확인 완료 (시도 %d).",
+                                    item.action,
+                                    attempt,
+                                )
+                            success = acknowledged
                             break
                         except asyncio.TimeoutError:
                             if attempt < SEND_RETRY_MAX:
@@ -718,11 +854,20 @@ class KocomGateway:
                                     SEND_RETRY_MAX,
                                 )
 
+                    if acknowledged and item.connection_generation is not None:
+                        await self._async_cutoff_release(item, item.connection_generation)
                     if not item.future.done():
                         item.future.set_result(success)
                 except asyncio.CancelledError:
                     if item is not None and not item.future.done():
-                        item.future.set_result(False)
+                        if waiter is not None and waiter.future.done() and not waiter.future.cancelled():
+                            confirmation = waiter.future.result()
+                            acknowledged = (
+                                isinstance(confirmation, DeviceState)
+                                and confirmation.key == item.key
+                                and waiter.predicate(confirmation)
+                            )
+                        item.future.set_result(acknowledged)
                     raise
                 finally:
                     self._tx_queue.task_done()

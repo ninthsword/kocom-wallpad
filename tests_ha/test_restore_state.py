@@ -234,3 +234,41 @@ async def test_registry_loop_restores_packets_without_confirming_live_state(
         assert all(not gateway.is_device_state_confirmed(key) for key in keys[1:])
         open_connection.assert_not_awaited()
         send_packet.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_cutoff_restore_preserves_registry_and_ordinary_light_identity(hass):
+    entry = MockConfigEntry(domain=DOMAIN, data={"host": "wallpad.invalid", "port": 8899})
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    legacy = registry.async_get_or_create("light", DOMAIN, "1-0_0-0:wallpad.invalid", config_entry=entry)
+    ordinary = registry.async_get_or_create("light", DOMAIN, "1-1_1-0:wallpad.invalid", config_entry=entry)
+    # Synthetic existing-protocol cutoff report formerly restored as LIGHT/0/0.
+    cutoff_packet = bytes.fromhex("aa5530bc0001000eff6500000000000000005f0d0d")
+    light_body = bytes((0x30, 0xBC, 0, 1, 0, 0x0E, 1, 0, 0, 255, 0, 0, 0, 0, 0, 0))
+    light_packet = b"\xaa\x55" + light_body + bytes((sum(light_body) % 256, 13, 13))
+    mock_restore_cache_with_extra_data(hass, [
+        (State(legacy.entity_id, "on"), {"packet": cutoff_packet.hex()}),
+        (State(ordinary.entity_id, "on"), {"packet": light_packet.hex()}),
+    ])
+    gateway = KocomGateway(hass, entry, "wallpad.invalid", 8899)
+    with (
+        patch.object(gateway.conn, "_is_connected", return_value=True),
+        patch.object(gateway.conn, "send", new=AsyncMock()) as send,
+    ):
+        await gateway.async_get_entity_registry()
+        cutoff_key = DeviceKey(DeviceType.LIGHTCUTOFF, 255, 0, SubType.NONE)
+        light_key = DeviceKey(DeviceType.LIGHT, 1, 1, SubType.NONE)
+        cutoff = gateway.registry.get(cutoff_key)
+        assert cutoff is not None and cutoff.platform == Platform.BINARY_SENSOR
+        assert gateway.registry.get(DeviceKey(DeviceType.LIGHT, 0, 0, SubType.NONE)) is None
+        assert gateway.registry.get(light_key) is not None
+        assert gateway._primary_report_times == {}
+        assert not gateway.is_device_state_confirmed(cutoff_key)
+        assert not gateway.is_device_state_confirmed(light_key)
+        assert registry.async_get(legacy.entity_id) is legacy
+        assert registry.async_get(ordinary.entity_id) is ordinary
+        gateway.controller.feed(cutoff_packet)
+        assert gateway.is_device_state_confirmed(cutoff_key)
+        assert not gateway.is_device_state_confirmed(light_key)
+        send.assert_not_awaited()

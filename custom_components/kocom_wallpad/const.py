@@ -23,13 +23,19 @@ PACKET_PREFIX = bytes([0xAA, 0x55])
 PACKET_SUFFIX = bytes([0x0D, 0x0D])
 PACKET_LEN = 21
 
+CONF_CUTOFF_RELEASE_AFTER_LIGHT = "cutoff_release_after_light"
+
 DEFAULT_TCP_PORT = 8899
 RECV_POLL_SEC = 0.05  # 50ms polling
 IDLE_GAP_SEC = 0.20   # 보내기 전 라인 유휴로 보고 싶은 최소 간격
 SEND_RETRY_MAX = 3
 SEND_RETRY_GAP = 0.15
 CMD_CONFIRM_TIMEOUT = 1.0  # 보낸 뒤 상태 확인을 기다리는 최대 시간
+TRANSPORT_SEND_TIMEOUT = 5.0
+TRANSPORT_CLOSE_TIMEOUT = 2.0
 BOOTSTRAP_REQUERY_INTERVAL = 60.0  # Seconds between re-asks of a thermostat still unknown in a session
+THERMOSTAT_REFRESH_INTERVAL = 120.0  # Seconds between confirmed-room freshness sweeps
+THERMOSTAT_STALE_AFTER = 120.0  # Accepted live primary report age before a refresh
 CHANGE_SOURCE_WINDOW_SEC = 2.0  # Frames this long before a thermostat report decide its change source
 EVENT_THERMOSTAT_CHANGED = f"{DOMAIN}_thermostat_changed"
 
