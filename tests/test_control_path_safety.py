@@ -1251,7 +1251,9 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_cancels_freshness_wait_and_settles_queue(self):
         self.gateway.on_device_state(self._thermostat_state(1))
-        self.gateway._primary_report_times[self._thermostat_state(1).key.key] = 0.0
+        self.gateway._primary_report_times[self._thermostat_state(1).key.key] = (
+            gateway_module.monotonic() - gateway_module.THERMOSTAT_STALE_AFTER
+        )
         task = asyncio.create_task(self.gateway._async_refresh_stale_thermostats())
         self.gateway._task_freshness_queries = task
         await asyncio.sleep(0)
