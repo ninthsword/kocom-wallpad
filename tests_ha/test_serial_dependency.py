@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from custom_components.kocom_wallpad import transport as transport_module
 from custom_components.kocom_wallpad.transport import AsyncConnection
 
 pytestmark = pytest.mark.asyncio
@@ -70,5 +71,39 @@ async def test_stream_error_closes_and_allows_reopen(operation):
         writer.close.assert_called_once()
         assert connection._reader is None and connection._writer is None
         assert not connection._is_connected()
+        assert await connection.open()
+        await connection.close()
+
+
+@pytest.mark.parametrize("operation", ["send", "close"])
+async def test_blocked_stream_is_bounded_and_can_reopen(operation):
+    entered = asyncio.Event()
+
+    async def blocked():
+        entered.set()
+        await asyncio.Event().wait()
+
+    writer = Mock()
+    writer.drain = AsyncMock(side_effect=blocked if operation == "send" else None)
+    writer.wait_closed = AsyncMock(side_effect=blocked)
+    reader = Mock()
+    connection = AsyncConnection("/test-only", None)
+    with (
+        patch("serialx.open_serial_connection", new=AsyncMock(return_value=(reader, writer))),
+        patch.object(transport_module, "TRANSPORT_SEND_TIMEOUT", 0.01, create=True),
+        patch.object(transport_module, "TRANSPORT_CLOSE_TIMEOUT", 0.01, create=True),
+    ):
+        assert await connection.open()
+        task = asyncio.create_task(connection.send(b"test") if operation == "send" else connection.close())
+        await asyncio.wait_for(entered.wait(), 0.5)
+        if operation == "send":
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(task, 0.5)
+        else:
+            await asyncio.wait_for(task, 0.5)
+        assert connection._reader is None and connection._writer is None
+        assert not connection._is_connected()
+        writer.close.assert_called_once()
+        writer.wait_closed = AsyncMock()
         assert await connection.open()
         await connection.close()

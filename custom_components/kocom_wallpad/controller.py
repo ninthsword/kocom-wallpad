@@ -363,6 +363,9 @@ class KocomController:
 
     def _handle_switch(self, frame: PacketFrame) -> list[DeviceState] | None:
         states: list[DeviceState] = []
+        if frame.dest != b"\x01\x00" or frame.src[0] != REV_DT_MAP[frame.dev_type]:
+            if not getattr(self.gateway, "_restore_mode", False):
+                return None
         if frame.command == 0x00:
             for idx in range(8):
                 key = DeviceKey(
@@ -695,7 +698,18 @@ class KocomController:
                     "device_class": device_class,
                     "unit_of_measurement": native_unit
                 }
-                if state > 0:
+                known_pm_zero = (
+                    state == 0
+                    and key.sub_type in (SubType.PM10, SubType.PM25)
+                    and (
+                        self.gateway.registry.get(key) is not None
+                        or (
+                            getattr(self.gateway, "_restore_mode", False)
+                            and getattr(self.gateway, "_force_register_uid", None) == key.unique_id
+                        )
+                    )
+                )
+                if state > 0 or known_pm_zero:
                     dev = DeviceState(key=key, platform=Platform.SENSOR, attribute=attribute, state=state)
                     states.append(dev)
             return states

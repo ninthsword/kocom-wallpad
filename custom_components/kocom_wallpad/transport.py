@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import serialx
 
-from .const import LOGGER
+from .const import LOGGER, TRANSPORT_CLOSE_TIMEOUT, TRANSPORT_SEND_TIMEOUT
 
 
 @dataclass
@@ -57,17 +57,20 @@ class AsyncConnection:
             return False
 
     async def close(self) -> None:
-        if self._writer is not None:
-            LOGGER.info("Closing connection")
-            self._writer.close()
-            try:
-                await self._writer.wait_closed()
-            except (OSError, RuntimeError) as err:
-                LOGGER.debug("Connection close failed: %r", err)
-            finally:
-                self._writer = None
+        writer = self._writer
+        self._writer = None
         self._reader = None
         self._connected = False
+        if writer is not None:
+            await self._close_writer(writer)
+
+    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Close the captured stream without touching a replacement connection."""
+        try:
+            writer.close()
+            await asyncio.wait_for(writer.wait_closed(), timeout=TRANSPORT_CLOSE_TIMEOUT)
+        except (OSError, RuntimeError, TimeoutError) as err:
+            LOGGER.debug("연결 종료를 완료하지 못했습니다: %r", err)
 
     def _is_connected(self) -> bool:
         return self._connected
@@ -79,17 +82,32 @@ class AsyncConnection:
         return max(0.0, time.monotonic() - self._last_activity_mono)
 
     async def send(self, data: bytes) -> int:
-        if not self._writer:
+        writer = self._writer
+        if writer is None:
             raise RuntimeError("connection not open")
         try:
             LOGGER.debug("Sending: %s", data.hex())
-            self._writer.write(data)
-            await self._writer.drain()
+            writer.write(data)
+            await asyncio.wait_for(writer.drain(), timeout=TRANSPORT_SEND_TIMEOUT)
             self._touch()
             return len(data)
-        except (OSError, RuntimeError) as e:
+        except asyncio.CancelledError:
+            if self._writer is writer:
+                self._writer = None
+                self._reader = None
+                self._connected = False
+                try:
+                    writer.close()
+                except (OSError, RuntimeError, TimeoutError):
+                    pass
+            raise
+        except (OSError, RuntimeError, TimeoutError) as e:
             LOGGER.warning("Send failed: %r", e)
-            await self.close()
+            if self._writer is writer:
+                self._writer = None
+                self._reader = None
+                self._connected = False
+            await self._close_writer(writer)
             raise
 
     async def recv(self, nbytes: int, timeout: float = 0.05) -> bytes:

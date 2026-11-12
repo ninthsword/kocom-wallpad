@@ -220,7 +220,10 @@ class KocomGateway:
         context: object | None = None,
         **kwargs,
     ) -> bool:
-        item = _CmdItem(key=key, action=action, kwargs=kwargs, context=context)
+        item = _CmdItem(
+            key=key, action=action, kwargs=kwargs, context=context,
+            connection_generation=self._connection_generation,
+        )
         return await self._async_queue_item(item)
 
     async def _async_send_status_query(
@@ -321,6 +324,7 @@ class KocomGateway:
         if connected == self._connection_available:
             return
         self._connection_generation += 1
+        self._resolve_pending(False)
         self.controller.clear_change_record()
         if self._connection_available and not connected:
             # A new socket session must receive a fresh physical report before
@@ -670,6 +674,16 @@ class KocomGateway:
             and self.controller.is_restore_pending(item.key.room_index, item.restore)
         )
 
+    def _is_current_action(self, item: _CmdItem) -> bool:
+        """Keep an ordinary command within its original caller and connection."""
+        return (
+            not item.future.done()
+            and not self._stopping
+            and self.conn._is_connected()
+            and item.connection_generation == self._connection_generation
+            and (item.restore is None or self._is_current_restore(item))
+        )
+
     async def _async_cutoff_release(self, item: _CmdItem, generation: int) -> None:
         """Optionally supplement a confirmed light command in the serialized sender."""
         cutoff_key = DeviceKey(DeviceType.LIGHTCUTOFF, 255, 0, SubType.NONE)
@@ -718,22 +732,21 @@ class KocomGateway:
                 item = await self._tx_queue.get()
                 self._active_item = item
                 acknowledged = False
+                waiter: _PendingWaiter | None = None
                 try:
                     if item is None or item.future.done():
                         continue
 
-                    # Generate the packet and its confirmation predicate.
-                    try:
-                        packet, expect_predicate, timeout = self.controller.generate_command(
-                            item.key, item.action, **item.kwargs
-                        )
-                    except (KeyError, RuntimeError, TypeError, ValueError):
-                        LOGGER.exception("generate_command failed")
-                        if not item.future.done():
-                            item.future.set_result(False)
-                        continue
-
                     if item.action == "status_query":
+                        try:
+                            packet, _, _ = self.controller.generate_command(
+                                item.key, item.action, **item.kwargs
+                            )
+                        except (KeyError, RuntimeError, TypeError, ValueError):
+                            LOGGER.exception("상태 조회 패킷을 생성하지 못했습니다")
+                            if not item.future.done():
+                                item.future.set_result(False)
+                            continue
                         success = False
                         if self._is_current_status_query(item):
                             try:
@@ -756,11 +769,14 @@ class KocomGateway:
                         continue
 
                     success = False
-                    generation = self._connection_generation
                     for attempt in range(1, SEND_RETRY_MAX + 1):
+                        if not self._is_current_action(item):
+                            break
                         LOGGER.debug("TX idle wait (max 1.0s) before '%s'...", item.action)
                         t0 = asyncio.get_running_loop().time()
                         while not self.is_idle():
+                            if not self._is_current_action(item):
+                                break
                             await asyncio.sleep(0.01)
                             if asyncio.get_running_loop().time() - t0 > 1.0:
                                 LOGGER.debug(
@@ -769,12 +785,16 @@ class KocomGateway:
                                 )
                                 break
 
-                        if item.restore is not None and not self._is_current_restore(item):
-                            LOGGER.debug("Thermostat restore for %s is no longer current", item.key)
+                        if not self._is_current_action(item):
                             break
 
-                        if not self.conn._is_connected():
-                            LOGGER.warning("Connection not ready. '%s' abort.", item.action)
+                        # Refresh state-dependent bytes after admission on every attempt.
+                        try:
+                            packet, expect_predicate, timeout = self.controller.generate_command(
+                                item.key, item.action, **item.kwargs
+                            )
+                        except (KeyError, RuntimeError, TypeError, ValueError):
+                            LOGGER.exception("명령 패킷을 생성하지 못했습니다")
                             break
 
                         # Register before sending: a wallpad can acknowledge in
@@ -783,10 +803,13 @@ class KocomGateway:
 
                         # Note the transmission first: a reply can be read in the
                         # same turn; the note stays if the send then fails.
-                        generation = self._connection_generation
                         self.controller.note_transmitted(packet, item.context)
                         try:
                             await self.conn.send(packet)
+                        except asyncio.CancelledError:
+                            if waiter in self._pendings:
+                                self._pendings.remove(waiter)
+                            raise
                         except (OSError, RuntimeError, TimeoutError) as err:
                             if waiter in self._pendings:
                                 self._pendings.remove(waiter)
@@ -805,12 +828,13 @@ class KocomGateway:
                                 and confirmation.key == item.key
                                 and expect_predicate(confirmation)
                             )
-                            LOGGER.debug(
-                                "Command '%s' confirmed (attempt %d).",
-                                item.action,
-                                attempt,
-                            )
-                            success = True
+                            if acknowledged:
+                                LOGGER.debug(
+                                    "명령 '%s' 확인 완료 (시도 %d).",
+                                    item.action,
+                                    attempt,
+                                )
+                            success = acknowledged
                             break
                         except asyncio.TimeoutError:
                             if attempt < SEND_RETRY_MAX:
@@ -830,12 +854,19 @@ class KocomGateway:
                                     SEND_RETRY_MAX,
                                 )
 
-                    if acknowledged:
-                        await self._async_cutoff_release(item, generation)
+                    if acknowledged and item.connection_generation is not None:
+                        await self._async_cutoff_release(item, item.connection_generation)
                     if not item.future.done():
                         item.future.set_result(success)
                 except asyncio.CancelledError:
                     if item is not None and not item.future.done():
+                        if waiter is not None and waiter.future.done() and not waiter.future.cancelled():
+                            confirmation = waiter.future.result()
+                            acknowledged = (
+                                isinstance(confirmation, DeviceState)
+                                and confirmation.key == item.key
+                                and waiter.predicate(confirmation)
+                            )
                         item.future.set_result(acknowledged)
                     raise
                 finally:
