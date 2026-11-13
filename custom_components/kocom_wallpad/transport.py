@@ -36,21 +36,28 @@ class AsyncConnection:
         """
         try:
             if self.port is None:
-                self._reader, self._writer = await serialx.open_serial_connection(
-                    url=self.host, baudrate=self.serial_baud
+                reader, writer = await asyncio.wait_for(
+                    serialx.open_serial_connection(url=self.host, baudrate=self.serial_baud),
+                    timeout=self.connect_timeout,
                 )
-                LOGGER.info("Connection opened for serial: %s", self.host)
+                LOGGER.info("시리얼 연결을 열었습니다: %s", self.host)
             else:
-                self._reader, self._writer = await asyncio.wait_for(
+                reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(self.host, self.port),
                     timeout=self.connect_timeout,
                 )
-                LOGGER.info("Connection opened for socket: %s:%s", self.host, self.port)
+                LOGGER.info("소켓 연결을 열었습니다: %s:%s", self.host, self.port)
+            self._reader, self._writer = reader, writer
             self._connected = True
             self._touch()
             return True
+        except asyncio.CancelledError:
+            self._connected = False
+            self._reader = None
+            self._writer = None
+            raise
         except (OSError, RuntimeError, ValueError) as e:
-            LOGGER.warning("Connection open failed: %r", e)
+            LOGGER.warning("연결을 열지 못했습니다: %r", e)
             self._connected = False
             self._reader = None
             self._writer = None
@@ -84,9 +91,9 @@ class AsyncConnection:
     async def send(self, data: bytes) -> int:
         writer = self._writer
         if writer is None:
-            raise RuntimeError("connection not open")
+            raise RuntimeError("연결이 열려 있지 않습니다")
         try:
-            LOGGER.debug("Sending: %s", data.hex())
+            LOGGER.debug("송신합니다: %s", data.hex())
             writer.write(data)
             await asyncio.wait_for(writer.drain(), timeout=TRANSPORT_SEND_TIMEOUT)
             self._touch()
@@ -102,7 +109,7 @@ class AsyncConnection:
                     pass
             raise
         except (OSError, RuntimeError, TimeoutError) as e:
-            LOGGER.warning("Send failed: %r", e)
+            LOGGER.warning("송신에 실패했습니다: %r", e)
             if self._writer is writer:
                 self._writer = None
                 self._reader = None
@@ -112,13 +119,13 @@ class AsyncConnection:
 
     async def recv(self, nbytes: int, timeout: float = 0.05) -> bytes:
         if not self._reader:
-            raise RuntimeError("connection not open")
+            raise RuntimeError("연결이 열려 있지 않습니다")
         try:
             chunk = await asyncio.wait_for(self._reader.read(nbytes), timeout=timeout)
         except asyncio.TimeoutError:
             return b""
         except (OSError, RuntimeError) as e:
-            LOGGER.warning("Recv failed: %r", e)
+            LOGGER.warning("수신에 실패했습니다: %r", e)
             await self.close()
             return b""
         if chunk:
@@ -127,6 +134,6 @@ class AsyncConnection:
             # StreamReader.read() returns b"" only for an orderly TCP EOF.
             # A timeout is handled above, while serial's empty-read behavior
             # remains unchanged.
-            LOGGER.info("TCP peer closed the connection")
+            LOGGER.info("TCP 상대가 연결을 종료했습니다")
             await self.close()
         return chunk

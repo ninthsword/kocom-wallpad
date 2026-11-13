@@ -82,14 +82,14 @@ class PacketFrame:
         elif self.src[0] == 0x01:
             return (self.dest[0], self.dest[1])
         else:
-            LOGGER.warning("Peer resolution failed: dest=%s, src=%s", self.dest.hex(), self.src.hex())
+            LOGGER.warning("통신 상대를 식별하지 못했습니다: dest=%s, src=%s", self.dest.hex(), self.src.hex())
             return (0, 0)
 
     @property
     def dev_type(self) -> DeviceType:
         dev_type = DEVICE_TYPE_MAP.get(self.peer[0], None)
         if dev_type is None:
-            LOGGER.debug("Unknown device type code=%s, raw=%s", hex(self.peer[0]), self.raw.hex())
+            LOGGER.debug("알 수 없는 기기 유형입니다: code=%s, raw=%s", hex(self.peer[0]), self.raw.hex())
             dev_type = DeviceType.UNKNOWN
         return dev_type
 
@@ -272,7 +272,7 @@ class KocomController:
             return
         self._rx_buf.extend(chunk)
         for pkt in self._split_buf():
-            LOGGER.debug("Packet received: raw=%s", pkt.hex())
+            LOGGER.debug("패킷을 수신했습니다: raw=%s", pkt.hex())
             self._dispatch_packet(pkt)
 
     def _split_buf(self) -> list[bytes]:
@@ -306,7 +306,7 @@ class KocomController:
     def _dispatch_packet(self, packet: bytes) -> None:
         frame = PacketFrame(packet)
         if self._checksum(packet[2:18]) != frame.checksum:
-            LOGGER.debug("Packet checksum is invalid. raw=%s", frame.raw.hex())
+            LOGGER.debug("패킷 체크섬이 올바르지 않습니다: raw=%s", frame.raw.hex())
             return
 
         if packet == self._cutoff_release_echo:
@@ -335,7 +335,7 @@ class KocomController:
         elif frame.dev_type == DeviceType.AIRQUALITY:
             dev_state = self._handle_airquality(frame)
         else:
-            LOGGER.debug("Unhandled device type: %s (raw=%s)", frame.dev_type.name, frame.raw.hex())
+            LOGGER.debug("처리할 수 없는 기기 유형입니다: %s (raw=%s)", frame.dev_type.name, frame.raw.hex())
             return
 
         if not dev_state:
@@ -544,11 +544,11 @@ class KocomController:
 
             if preset_mode != "unknown" and preset_mode != "ventilation":
                 if self._device_storage.get("ventil_modes") is None:
-                    LOGGER.debug("New ventilation preset detected (excluding default).")
+                    LOGGER.debug("기본값 이외의 새 환기 모드를 발견했습니다.")
                     self._device_storage["ventil_feature"] = True
                     self._device_storage["ventil_modes"] = ["ventilation"]
                 if preset_mode not in self._device_storage["ventil_modes"]:
-                    LOGGER.debug(f"Added presets: {preset_mode}")
+                    LOGGER.debug(f"추가한 환기 모드: {preset_mode}")
                     self._device_storage["ventil_modes"].append(preset_mode)
             attribute = {
                 "feature_preset": self._device_storage.get("ventil_feature", False),
@@ -607,6 +607,15 @@ class KocomController:
             return dev
 
     def _handle_elevator(self, frame: PacketFrame) -> list[DeviceState]:
+        if (
+            frame.raw[2:5] == b"\x30\xbc\x00"
+            and frame.dest == b"\x01\x00"
+            and frame.src[0] == 0x44
+            and frame.command == 0x01
+            and frame.payload == bytes(8)
+            and not getattr(self.gateway, "_restore_mode", False)
+        ):
+            return []
         states: list[DeviceState] = []
         key = DeviceKey(
             device_type=frame.dev_type,
@@ -732,6 +741,38 @@ class KocomController:
             return self._match_key_and(key, _off), CMD_CONFIRM_TIMEOUT
         return self._match_key_and(key, lambda _d: False), CMD_CONFIRM_TIMEOUT
 
+    def _expect_for_elevator(self, key: DeviceKey, action: str) -> tuple[Predicate, float]:
+        if action != "turn_on":
+            raise ValueError(f"엘리베이터에서 지원하지 않는 동작입니다: {action}")
+
+        def reported(dev: DeviceState) -> bool:
+            raw = getattr(dev, "_packet", None)
+            if (
+                key.sub_type != SubType.NONE
+                or key.device_index != 0
+                or not isinstance(raw, bytes)
+                or len(raw) != PACKET_LEN
+                or not raw.startswith(PACKET_PREFIX)
+                or not raw.endswith(PACKET_SUFFIX)
+                or raw[2] != 0x30
+                or raw[4] != 0x00
+                or self._checksum(raw[2:18]) != raw[18]
+            ):
+                return False
+            frame = PacketFrame(raw)
+            peer = bytes((0x44, key.room_index))
+            if (frame.dest, frame.src) not in ((b"\x01\x00", peer), (peer, b"\x01\x00")):
+                return False
+            if raw[3] == 0xBC:
+                return (
+                    frame.dest == b"\x01\x00"
+                    and frame.command == 0x00
+                    and frame.payload[0] in (0x01, 0x02, 0x03)
+                )
+            return raw[3] == 0xDC and frame.payload[0] in (0x00, 0x01, 0x02)
+
+        return self._match_key_and(key, reported), CMD_CONFIRM_TIMEOUT
+
     def _expect_for_ventilation(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
         def is_on(d: DeviceState) -> bool:
             return isinstance(d.state, dict) and d.state.get("state") is True
@@ -756,7 +797,7 @@ class KocomController:
         # 밸브는 동작이 느릴 수 있으니 기본 타임아웃 상향
         base_timeout = max(CMD_CONFIRM_TIMEOUT, 1.5)
         if action != "turn_off":
-            raise ValueError(f"Unsupported gas valve action: {action}")
+            raise ValueError(f"가스 밸브에서 지원하지 않는 동작입니다: {action}")
         return self._match_key_and(key, lambda d: bool(d.state) is False), base_timeout
 
     def _expect_for_thermostat(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
@@ -796,7 +837,9 @@ class KocomController:
 
     def build_expectation(self, key: DeviceKey, action: str, **kwargs: Any) -> tuple[Predicate, float]:
         dt = key.device_type
-        if dt in (DeviceType.LIGHT, DeviceType.LIGHTCUTOFF, DeviceType.OUTLET, DeviceType.ELEVATOR):
+        if dt == DeviceType.ELEVATOR:
+            return self._expect_for_elevator(key, action)
+        if dt in (DeviceType.LIGHT, DeviceType.LIGHTCUTOFF, DeviceType.OUTLET):
             return self._expect_for_switch_like(key, action, **kwargs)
         if dt == DeviceType.VENTILATION:
             return self._expect_for_ventilation(key, action, **kwargs)
@@ -816,7 +859,7 @@ class KocomController:
             raise ValueError("일괄소등은 읽기 전용입니다")
 
         if device_type not in REV_DT_MAP:
-            raise ValueError(f"Invalid device type: {device_type}")
+            raise ValueError(f"올바르지 않은 기기 유형입니다: {device_type}")
 
         type_bytes = bytes([0x30, 0xBC])
         padding = bytes([0x00])
@@ -829,9 +872,9 @@ class KocomController:
 
         if action == "status_query":
             if device_type != DeviceType.THERMOSTAT:
-                raise ValueError("Status query is supported only for thermostats")
+                raise ValueError("상태 조회는 난방에서만 지원합니다")
             if not 0x00 <= room_index <= 0xFE:
-                raise ValueError("Status query requires a physical thermostat room")
+                raise ValueError("상태 조회에는 실제 난방 방 번호가 필요합니다")
             command = bytes([0x3A])
         elif device_type in (DeviceType.LIGHT, DeviceType.OUTLET):
             data = self._generate_switch(key, action, data)
@@ -843,16 +886,18 @@ class KocomController:
             data = self._generate_airconditioner(action, data, **kwargs)
         elif device_type == DeviceType.GASVALVE:
             if action != "turn_off":
-                raise ValueError(f"Unsupported gas valve action: {action}")
+                raise ValueError(f"가스 밸브에서 지원하지 않는 동작입니다: {action}")
             command = bytes([0x02])
         elif device_type == DeviceType.ELEVATOR:
+            if action != "turn_on":
+                raise ValueError(f"엘리베이터에서 지원하지 않는 동작입니다: {action}")
             dest_dev = bytes([0x01])
             dest_room = bytes([0x00])
             src_dev = bytes([0x44])
             src_room = bytes([room_index & 0xFF])
             command = bytes([0x01])
         else:
-            raise ValueError(f"Invalid device generator: {device_type}")
+            raise ValueError(f"명령을 생성할 수 없는 기기 유형입니다: {device_type}")
 
         body = b"".join([type_bytes, padding, dest_dev, dest_room, src_dev, src_room, command, bytes(data)])
         checksum = bytes([self._checksum(body)])
@@ -904,12 +949,12 @@ class KocomController:
             data[0] = 0x11
             data[2] = tt
         else:
-            raise ValueError(f"Unsupported thermostat action: {action}")
+            raise ValueError(f"난방에서 지원하지 않는 동작입니다: {action}")
         return data
 
     def _require_confirmed_thermostat(self, key: DeviceKey) -> None:
         if not self.gateway.is_device_state_confirmed(key):
-            raise RuntimeError("Thermostat has not reported its state in this connection")
+            raise RuntimeError("현재 연결에서 난방 상태를 아직 수신하지 못했습니다")
 
     def _preset_none_target(self, key: DeviceKey) -> int:
         """Return the target byte of a frame whose preset byte is none."""
@@ -918,29 +963,29 @@ class KocomController:
         dev = self.gateway.registry.get(key)
         state = dev.state if dev is not None else None
         if not isinstance(state, dict):
-            raise RuntimeError("Thermostat state is unknown")
+            raise RuntimeError("난방 상태를 알 수 없습니다")
         target = self._home_target_value(state.get("target_temp"))
         home = self._home_targets.get(key.room_index)
         if home is not None and (state.get("preset_mode") == PRESET_AWAY or target is None):
             return int(home)
         if target is None:
-            raise RuntimeError("Thermostat target temperature is outside 5..40")
+            raise RuntimeError("난방 희망온도가 5..40 범위를 벗어났습니다")
         return int(target)
 
     @staticmethod
     def _encode_whole_temperature(value: Any) -> int:
         """Return a protocol-safe whole-degree temperature without truncation."""
         if isinstance(value, bool):
-            raise TypeError("Target temperature must be a whole degree")
+            raise TypeError("희망온도는 정수여야 합니다")
         try:
             temperature = float(value)
         except (TypeError, ValueError) as exc:
-            raise ValueError("Target temperature must be a whole degree") from exc
+            raise ValueError("희망온도는 정수여야 합니다") from exc
         if not temperature.is_integer():
-            raise ValueError("Target temperature must be a whole degree")
+            raise ValueError("희망온도는 정수여야 합니다")
         encoded = int(temperature)
         if not 0 <= encoded <= 255:
-            raise ValueError("Target temperature is outside the protocol range")
+            raise ValueError("희망온도가 프로토콜 범위를 벗어났습니다")
         return encoded
     
     def _generate_airconditioner(self, action: str, data: bytearray, **kwargs: Any) -> bytearray:

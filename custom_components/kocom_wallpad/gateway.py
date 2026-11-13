@@ -158,7 +158,7 @@ class KocomGateway:
 
     async def async_start(self) -> None:
         self._stopping = False
-        LOGGER.info("Starting gateway - %s:%s", self.host, self.port or "")
+        LOGGER.info("게이트웨이를 시작합니다: %s:%s", self.host, self.port or "")
         await self.conn.open()
         self._last_rx_monotonic = self.conn.idle_since()
         self._last_tx_monotonic = self.conn.idle_since()
@@ -169,7 +169,7 @@ class KocomGateway:
 
     async def async_stop(self, event: Event | None = None) -> None:
         self._stopping = True
-        LOGGER.info("Stopping gateway - %s:%s", self.host, self.port or "")
+        LOGGER.info("게이트웨이를 종료합니다: %s:%s", self.host, self.port or "")
         if self._task_reader:
             self._task_reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -193,7 +193,7 @@ class KocomGateway:
 
     async def _read_loop(self) -> None:
         try:
-            LOGGER.debug("Starting read loop")
+            LOGGER.debug("수신 작업을 시작합니다")
             while True:
                 if not self.conn._is_connected():
                     self._sync_connection_availability()
@@ -209,7 +209,7 @@ class KocomGateway:
                 elif not self.conn._is_connected():
                     self._sync_connection_availability()
         except asyncio.CancelledError:
-            LOGGER.debug("Read loop cancelled")
+            LOGGER.debug("수신 작업이 취소되었습니다")
             raise
 
     async def async_send_action(
@@ -220,6 +220,8 @@ class KocomGateway:
         context: object | None = None,
         **kwargs,
     ) -> bool:
+        if key.device_type == DeviceType.ELEVATOR and action != "turn_on":
+            return False
         item = _CmdItem(
             key=key, action=action, kwargs=kwargs, context=context,
             connection_generation=self._connection_generation,
@@ -280,7 +282,7 @@ class KocomGateway:
 
         is_new, changed = self.registry.upsert(dev, allow_insert=allow_insert)
         if is_new:
-            LOGGER.info("New device has been detected. Register -> %s", dev.key)
+            LOGGER.info("새 기기를 발견하여 등록합니다: %s", dev.key)
             async_dispatcher_send(
                 self.hass,
                 self.async_signal_new_device(dev.platform),
@@ -297,7 +299,7 @@ class KocomGateway:
             and dev.platform == Platform.CLIMATE
         )
         if changed or availability_changed or is_live_thermostat_report:
-            LOGGER.debug("Device state has been changed. Update -> %s", dev.key)
+            LOGGER.debug("기기 상태를 갱신합니다: %s", dev.key)
             async_dispatcher_send(
                 self.hass,
                 self.async_signal_device_updated(dev.key.unique_id),
@@ -460,10 +462,10 @@ class KocomGateway:
             if self.is_device_state_confirmed(key):
                 continue
             if attempt is None:
-                LOGGER.debug("Re-asking still unknown thermostat %s", key)
+                LOGGER.debug("상태가 확인되지 않은 난방에 다시 조회합니다: %s", key)
             elif attempt > 1:
                 LOGGER.debug(
-                    "Retrying status query for %s (attempt %d/%d)",
+                    "상태 조회를 재시도합니다: %s (시도 %d/%d)",
                     key,
                     attempt,
                     SEND_RETRY_MAX,
@@ -537,11 +539,11 @@ class KocomGateway:
         ent_entry = ent_reg.async_get(entity_id)
         if ent_entry and ent_entry.unique_id:
             self._force_register_uid = ent_entry.unique_id.split(":")[0]
-        LOGGER.debug("Restore state -> packet: %s", packet)
+        LOGGER.debug("복원 상태의 패킷: %s", packet)
         self.controller._dispatch_packet(bytes.fromhex(packet))
         self._force_register_uid = None
         device_storage = state.extra_data.as_dict().get("device_storage", {})
-        LOGGER.debug("Restore state -> device_storage: %s", device_storage)
+        LOGGER.debug("복원 상태의 device_storage: %s", device_storage)
         self.controller._device_storage = device_storage
 
     async def async_get_entity_registry(self) -> None:
@@ -726,7 +728,7 @@ class KocomGateway:
             LOGGER.warning("일괄소등 해제 추가 송신에 실패했습니다: %s", err)
 
     async def _sender_loop(self) -> None:
-        LOGGER.debug("Starting sender loop")
+        LOGGER.debug("송신 작업을 시작합니다")
         try:
             while True:
                 item = await self._tx_queue.get()
@@ -763,7 +765,7 @@ class KocomGateway:
                                     self._last_tx_monotonic = asyncio.get_running_loop().time()
                                     success = True
                             except (OSError, RuntimeError, TimeoutError) as err:
-                                LOGGER.warning("Status query send failed: %s", err)
+                                LOGGER.warning("상태 조회 송신에 실패했습니다: %s", err)
                         if not item.future.done():
                             item.future.set_result(success)
                         continue
@@ -772,7 +774,7 @@ class KocomGateway:
                     for attempt in range(1, SEND_RETRY_MAX + 1):
                         if not self._is_current_action(item):
                             break
-                        LOGGER.debug("TX idle wait (max 1.0s) before '%s'...", item.action)
+                        LOGGER.debug("명령 '%s' 송신 전 유휴 상태를 최대 1.0초 기다립니다", item.action)
                         t0 = asyncio.get_running_loop().time()
                         while not self.is_idle():
                             if not self._is_current_action(item):
@@ -780,7 +782,7 @@ class KocomGateway:
                             await asyncio.sleep(0.01)
                             if asyncio.get_running_loop().time() - t0 > 1.0:
                                 LOGGER.debug(
-                                    "Idle wait timeout (%.2fs).",
+                                    "유휴 상태 대기 시간이 초과되었습니다 (%.2f초)",
                                     asyncio.get_running_loop().time() - t0,
                                 )
                                 break
@@ -813,7 +815,7 @@ class KocomGateway:
                         except (OSError, RuntimeError, TimeoutError) as err:
                             if waiter in self._pendings:
                                 self._pendings.remove(waiter)
-                            LOGGER.warning("Send failed on attempt %d: %s", attempt, err)
+                            LOGGER.warning("송신에 실패했습니다 (시도 %d): %s", attempt, err)
                             if attempt < SEND_RETRY_MAX:
                                 await asyncio.sleep(SEND_RETRY_GAP)
                                 continue
@@ -839,8 +841,8 @@ class KocomGateway:
                         except asyncio.TimeoutError:
                             if attempt < SEND_RETRY_MAX:
                                 LOGGER.warning(
-                                    "No confirmation for '%s' (attempt %d/%d). "
-                                    "Retrying in %.2fs...",
+                                    "명령 '%s'의 응답을 확인하지 못했습니다 (시도 %d/%d). "
+                                    "%.2f초 후 다시 시도합니다",
                                     item.action,
                                     attempt,
                                     SEND_RETRY_MAX,
@@ -849,7 +851,7 @@ class KocomGateway:
                                 await asyncio.sleep(SEND_RETRY_GAP)
                             else:
                                 LOGGER.error(
-                                    "Command '%s' failed after %d attempts.",
+                                    "명령 '%s'이(가) %d회 시도 후 실패했습니다",
                                     item.action,
                                     SEND_RETRY_MAX,
                                 )
@@ -874,6 +876,6 @@ class KocomGateway:
                     if self._active_item is item:
                         self._active_item = None
         except asyncio.CancelledError:
-            LOGGER.debug("Sender loop cancelled")
+            LOGGER.debug("송신 작업이 취소되었습니다")
             self._resolve_queued(False)
             raise

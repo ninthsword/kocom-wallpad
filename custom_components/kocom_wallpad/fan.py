@@ -104,11 +104,11 @@ class KocomFan(KocomBaseEntity, FanEntity):  # pyright: ignore[reportIncompatibl
         args = {"speed": 0}
         if percentage > 0:
             args["speed"] = percentage_to_ordered_list_item(self._device.attribute["speed_list"], percentage)
-        await self._async_send_or_raise("set fan speed", "set_percentage", **args)
+        await self._async_send_or_raise("환기 풍량 설정", "set_percentage", **args)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         args = {"preset_mode": preset_mode}
-        await self._async_send_or_raise("set fan preset", "set_preset", **args)
+        await self._async_send_or_raise("환기 모드 설정", "set_preset", **args)
 
     async def async_turn_on(
         self,
@@ -118,7 +118,7 @@ class KocomFan(KocomBaseEntity, FanEntity):  # pyright: ignore[reportIncompatibl
         speed: str | None = None,
         **kwargs: Any,
     ) -> None:
-        await self._async_send_or_raise("turn on the fan", "turn_on")
+        await self._async_send_or_raise("환기 켜기", "turn_on")
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._async_send_or_raise("turn off the fan", "turn_off")
+        await self._async_send_or_raise("환기 끄기", "turn_off")

@@ -97,7 +97,7 @@ class KocomBaseEntity(RestoreEntity):
             try:
                 unsub()
             except (RuntimeError, ValueError) as err:
-                LOGGER.debug("Entity unsubscribe failed: %s", err)
+                LOGGER.debug("엔티티 구독 해제에 실패했습니다: %s", err)
         self._unsubs.clear()
 
     @callback
@@ -126,7 +126,7 @@ class KocomBaseEntity(RestoreEntity):
     ) -> None:
         """Send an action and surface transport/confirmation failures to HA."""
         if not self.available:
-            raise HomeAssistantError("Kocom wallpad is unavailable")
+            raise HomeAssistantError("코콤 월패드에 연결할 수 없습니다")
         if context is None:
             sent = await self.gateway.async_send_action(self._device.key, action, **args)
         else:
@@ -134,7 +134,7 @@ class KocomBaseEntity(RestoreEntity):
                 self._device.key, action, context=context, **args
             )
         if not sent:
-            raise HomeAssistantError(f"Kocom wallpad could not {description}")
+            raise HomeAssistantError(f"코콤 월패드 명령에 실패했습니다: {description}")
 
     @property
     def extra_restore_state_data(self) -> RestoredExtraData:
