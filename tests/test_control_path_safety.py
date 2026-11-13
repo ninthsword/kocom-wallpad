@@ -111,6 +111,8 @@ def _install_homeassistant_shims() -> None:
         setattr(module, attr, value)
         if package == "switch":
             _set_attributes(module, SwitchEntity=object)
+        if package == "sensor":
+            _set_attributes(module, SensorEntity=object)
         setattr(module, f"{package.title().replace('_', '')}EntityDescription", _EntityDescription)
         setattr(components, package, module)
 
@@ -199,6 +201,7 @@ from custom_components.kocom_wallpad.fan import KocomFan
 from custom_components.kocom_wallpad.gateway import KocomGateway, _CmdItem
 from custom_components.kocom_wallpad.light import KocomLight
 from custom_components.kocom_wallpad.models import DeviceKey, DeviceState
+from custom_components.kocom_wallpad.sensor import KocomSensor
 from custom_components.kocom_wallpad.switch import KocomSwitch
 from custom_components.kocom_wallpad.transport import AsyncConnection
 
@@ -3369,6 +3372,367 @@ class BoundedTransportReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(connection._writer)
                 self.assertIsNone(connection._reader)
                 self.assertFalse(connection._is_connected())
+
+class ElevatorRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    gateway: KocomGateway
+    connection: _FakeConnection
+    asyncSetUp = GatewaySafetyTests.asyncSetUp
+    asyncTearDown = GatewaySafetyTests.asyncTearDown
+    _wait_for_sent = GatewaySafetyTests._wait_for_sent
+    pause = OriginalCommandReliabilityTests.pause
+    key = DeviceKey(DeviceType.ELEVATOR, 0, 0, SubType.NONE)
+    request = bytes.fromhex("aa5530bc0001004400010000000000000000320d0d")
+    arrival = bytes.fromhex(_REPORTS["elevator_arrival"])
+
+    def device(self, gateway: KocomGateway, key: DeviceKey) -> DeviceState:
+        device = gateway.registry.get(key)
+        assert device is not None
+        return device
+
+    def start(self):
+        self.gateway._connection_available = True
+        self.gateway._connection_generation = 1
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+        original = self.gateway.controller.generate_command
+
+        def generate(key, action, **kwargs):
+            packet, predicate, _timeout = original(key, action, **kwargs)
+            return packet, predicate, 0.01
+
+        patcher = patch.object(self.gateway.controller, "generate_command", side_effect=generate)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def restore_saved(self, packet: bytes) -> KocomGateway:
+        self.gateway.entry.entry_id = "entry"
+        self.gateway._restore_mode = True
+        try:
+            self.gateway.controller.feed(packet)
+        finally:
+            self.gateway._restore_mode = False
+        source = self.gateway.registry.get(self.key)
+        assert source is not None
+        entity = KocomSwitch(self.gateway, source)
+        saved = entity.extra_restore_state_data
+        assert isinstance(saved, dict)
+        with patch.object(gateway_module, "AsyncConnection", _FakeConnection):
+            fresh = KocomGateway(self.gateway.hass, self.gateway.entry, "test", 1)
+        entry = types.SimpleNamespace(entity_id="switch.elevator", unique_id=entity.unique_id)
+        registry = types.SimpleNamespace(async_get=lambda _id: entry)
+        store = types.SimpleNamespace(async_get_stored_state=lambda _id: types.SimpleNamespace(
+            extra_data=types.SimpleNamespace(as_dict=lambda: saved)
+        ))
+        with (
+            patch.object(gateway_module.er, "async_get", return_value=registry),
+            patch.object(gateway_module.er, "async_entries_for_config_entry", return_value=[entry]),
+            patch.object(gateway_module.restore_state, "async_get", return_value=store),
+        ):
+            await fresh.async_get_entity_registry()
+        restored = self.device(fresh, self.key)
+        assert restored is not None
+        self.assertEqual(entity.unique_id, KocomSwitch(fresh, restored).unique_id)
+        self.assertEqual(saved, KocomSwitch(fresh, restored).extra_restore_state_data)
+        self.assertFalse(fresh.is_device_state_confirmed(self.key))
+        self.assertTrue(fresh._tx_queue.empty())
+        return fresh
+
+    async def test_elevator_off_and_unsupported_actions_rejected_before_send(self):
+        self.gateway.controller.feed(self.arrival)
+        device = self.gateway.registry.get(self.key)
+        assert device is not None
+        entity = KocomSwitch(self.gateway, device)
+        for connected in (True, False):
+            self.connection.connected = connected
+            with (
+                patch.object(self.gateway, "async_send_action", new=AsyncMock(return_value=True)) as send,
+                self.assertRaises(HomeAssistantError) as error,
+            ):
+                await entity.async_turn_off()
+            self.assertEqual("엘리베이터는 호출만 지원하며 호출을 취소할 수 없습니다", str(error.exception))
+            send.assert_not_awaited()
+        self.connection.connected = True
+        for action in ("turn_off", "toggle", "status_query"):
+            with self.subTest(action=action):
+                with self.assertRaises(ValueError):
+                    self.gateway.controller.generate_command(self.key, action)
+                with self.assertRaises(ValueError):
+                    self.gateway.controller.build_expectation(self.key, action)
+                with patch.object(self.gateway, "_async_queue_item", new=AsyncMock()) as queue:
+                    self.assertFalse(await self.gateway.async_send_action(self.key, action))
+                    queue.assert_not_awaited()
+        self.assertEqual([], self.connection.sent)
+
+    def test_elevator_call_frame_and_checksum_remain_exact(self):
+        packet, _predicate, _timeout = self.gateway.controller.generate_command(self.key, "turn_on")
+        self.assertEqual(self.request, packet)
+        self.assertEqual(sum(packet[2:18]) % 256, packet[18])
+
+    async def test_restored_and_reconnected_elevator_is_available_but_unknown(self):
+        fresh = await self.restore_saved(self.arrival)
+        for gateway in (fresh, self.gateway):
+            gateway._connection_available = True
+            gateway._sync_connection_availability()
+            if gateway is self.gateway:
+                self.connection.connected = False
+                gateway._sync_connection_availability()
+                self.connection.connected = True
+                gateway._sync_connection_availability()
+            for device in gateway.registry.all_by_platform(Platform.SWITCH) + gateway.registry.all_by_platform(Platform.SENSOR):
+                entity = KocomSwitch(gateway, device) if device.platform == Platform.SWITCH else KocomSensor(gateway, device)
+                self.assertTrue(entity.available)
+                self.assertIsNone(entity.is_on if isinstance(entity, KocomSwitch) else entity.native_value)
+            self.assertIs(False, self.device(gateway, self.key).state)
+        fresh.controller.feed(self.arrival)
+        direction = DeviceKey(DeviceType.ELEVATOR, 0, 0, SubType.DIRECTION)
+        fresh._live_device_keys.remove(direction.key)
+        self.assertIs(False, KocomSwitch(fresh, self.device(fresh, self.key)).is_on)
+        self.assertIsNone(KocomSensor(fresh, self.device(fresh, direction)).native_value)
+
+    async def test_legacy_saved_call_request_restores_without_live_confirmation(self):
+        fresh = await self.restore_saved(self.request)
+        self.assertIsNone(KocomSwitch(fresh, self.device(fresh, self.key)).is_on)
+        fresh.controller.feed(self.request)
+        self.assertFalse(fresh.is_device_state_confirmed(self.key))
+        fresh._task_sender = asyncio.create_task(fresh._sender_loop())
+        connection = fresh.conn
+        assert isinstance(connection, _FakeConnection)
+        connection.on_send = lambda _packet: fresh.controller.feed(self.arrival)
+        try:
+            self.assertTrue(await fresh.async_send_action(self.key, "turn_on"))
+            self.assertEqual([self.request], connection.sent)
+        finally:
+            await fresh.async_stop()
+
+    async def test_live_call_echo_does_not_update_or_confirm_elevator(self):
+        fresh = await self.restore_saved(self.arrival)
+        before = self.device(fresh, self.key)
+        waiter = fresh._register_confirmation(self.key, lambda _device: True)
+        fresh.controller.feed(self.request)
+        self.assertIs(before, self.device(fresh, self.key))
+        self.assertEqual(self.arrival, self.device(fresh, self.key)._packet)
+        self.assertFalse(fresh.is_device_state_confirmed(self.key))
+        self.assertFalse(waiter.future.done())
+        fresh._resolve_pending(False)
+        self.gateway.registry._states.clear()
+        self.gateway.controller.feed(self.request)
+        self.assertEqual({}, self.gateway.registry._states)
+
+    async def test_fresh_arrival_confirms_call_while_switch_remains_off(self):
+        self.gateway.controller.feed(self.arrival)
+        self.start()
+        self.connection.on_send = lambda _packet: self.gateway.controller.feed(self.arrival)
+        self.assertTrue(await self.gateway.async_send_action(self.key, "turn_on"))
+        self.assertEqual([self.request], self.connection.sent)
+        self.assertEqual([False, "arrival", "12"], [
+            self.device(self.gateway, DeviceKey(DeviceType.ELEVATOR, 0, 0, subtype)).state
+            for subtype in (SubType.NONE, SubType.DIRECTION, SubType.FLOOR)
+        ])
+        self.assertIs(False, KocomSwitch(self.gateway, self.device(self.gateway, self.key)).is_on)
+
+    async def test_elevator_call_rejects_cached_idle_foreign_and_malformed_confirmation(self):
+        _packet, predicate, _timeout = self.gateway.controller.generate_command(self.key, "turn_on")
+        device = DeviceState(self.key, Platform.SWITCH, {}, True)
+        self.assertFalse(predicate(device))
+        negatives = [b"", b"bad", self.request]
+        mirrored = bytearray(self.arrival)
+        mirrored[5:9] = bytes.fromhex("44000100")
+        mirrored[18] = sum(mirrored[2:18]) % 256
+        negatives.append(bytes(mirrored))
+        for index, value in ((10, 0), (9, 1), (5, 2), (7, 0x45), (8, 1), (3, 0xAC), (0, 0), (20, 0), (18, 0)):
+            altered = bytearray(self.arrival)
+            altered[index] = value
+            if index != 18:
+                altered[18] = sum(altered[2:18]) % 256
+            negatives.append(bytes(altered))
+        for packet in negatives:
+            device._packet = packet
+            self.assertFalse(predicate(device), packet.hex())
+        device._packet = self.arrival
+        for key in (DeviceKey(DeviceType.ELEVATOR, 1, 0, SubType.NONE),
+                    DeviceKey(DeviceType.ELEVATOR, 0, 0, SubType.DIRECTION)):
+            device.key = key
+            self.assertFalse(predicate(device))
+        device.key = self.key
+        self.assertTrue(predicate(device))
+        self.gateway.controller.feed(self.arrival)
+        self.start()
+        with patch.object(gateway_module, "SEND_RETRY_MAX", 1):
+            self.assertFalse(await self.gateway.async_send_action(self.key, "turn_on"))
+            self.connection.on_send = lambda _packet: self.gateway.controller.feed(self.request)
+            self.assertFalse(await self.gateway.async_send_action(self.key, "turn_on"))
+            self.gateway._restore_mode = True
+            self.connection.on_send = lambda _packet: self.gateway.controller.feed(self.arrival)
+            try:
+                self.assertFalse(await self.gateway.async_send_action(self.key, "turn_on"))
+            finally:
+                self.gateway._restore_mode = False
+        reports = [bytes.fromhex(_REPORTS["elevator_down"]), self.arrival]
+        # Synthetic variants preserve the existing DC decoder, not hardware evidence.
+        for addresses in (bytes.fromhex("01004400"), bytes.fromhex("44000100")):
+            for direction in (0, 1, 2):
+                called = bytearray(self.arrival)
+                called[3] = 0xDC
+                called[5:9] = addresses
+                called[9] = 1
+                called[10] = direction
+                called[18] = sum(called[2:18]) % 256
+                reports.append(bytes(called))
+        for packet in reports:
+            self.connection.on_send = lambda _request, packet=packet: self.gateway.controller.feed(packet)
+            self.assertTrue(await self.gateway.async_send_action(self.key, "turn_on"))
+
+    async def test_elevator_call_cancellation_retry_stop_and_epoch_guards(self):
+        self.start()
+        self.connection.idle = False
+        entered, release, paused = self.pause(0.01)
+        with paused:
+            caller = asyncio.create_task(self.gateway.async_send_action(self.key, "turn_on"))
+            await asyncio.wait_for(entered.wait(), 0.5)
+            caller.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await caller
+            release.set()
+            await asyncio.wait_for(self.gateway._tx_queue.join(), 0.5)
+        self.assertEqual([], self.connection.sent)
+        self.connection.idle = True
+        entered, release, paused = self.pause(0.001)
+        with paused:
+            caller = asyncio.create_task(self.gateway.async_send_action(self.key, "turn_on"))
+            await asyncio.wait_for(entered.wait(), 0.5)
+            caller.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await caller
+            release.set()
+            await asyncio.wait_for(self.gateway._tx_queue.join(), 0.5)
+        self.assertEqual(1, len(self.connection.sent))
+        self.assertEqual([], self.gateway._pendings)
+        self.connection.sent.clear()
+
+        def failed_send(_packet):
+            raise OSError("synthetic-send-failure")
+
+        self.connection.on_send = failed_send
+        with patch.object(gateway_module, "SEND_RETRY_MAX", 1):
+            self.assertFalse(await self.gateway.async_send_action(self.key, "turn_on"))
+        self.assertEqual([], self.gateway._pendings)
+        self.connection.sent.clear()
+        def reconnect_with_arrival(_packet):
+            self.connection.connected = False
+            self.gateway._sync_connection_availability()
+            self.connection.connected = True
+            self.gateway._sync_connection_availability()
+            self.gateway.controller.feed(self.arrival)
+
+        self.connection.on_send = reconnect_with_arrival
+        self.assertFalse(await self.gateway.async_send_action(self.key, "turn_on"))
+        self.assertTrue(self.gateway.is_device_state_confirmed(self.key))
+        self.connection.on_send = None
+        caller = asyncio.create_task(self.gateway.async_send_action(self.key, "turn_on"))
+        await self._wait_for_sent(2)
+        await self.gateway.async_stop()
+        self.assertFalse(await caller)
+        self.assertEqual([], self.gateway._pendings)
+        self.assertTrue(self.gateway._tx_queue.empty())
+        self.connection.connected = True
+        self.gateway.controller.feed(self.arrival)
+        self.assertFalse(caller.result())
+
+    async def test_control_service_errors_and_transport_logs_are_korean(self):
+        self.gateway.controller.feed(self.arrival)
+        entity = KocomSwitch(self.gateway, self.device(self.gateway, self.key))
+        self.connection.connected = False
+        with self.assertRaises(HomeAssistantError) as unavailable:
+            await entity.async_turn_on()
+        self.assertIn("연결", str(unavailable.exception))
+        self.connection.connected = True
+        with patch.object(self.gateway, "async_send_action", new=AsyncMock(return_value=False)):
+            with self.assertRaises(HomeAssistantError) as failed:
+                await entity.async_turn_on()
+            self.assertIn("실패", str(failed.exception))
+        connection = AsyncConnection("/test-only", None)
+        with (
+            patch("serialx.open_serial_connection", new=AsyncMock(side_effect=OSError("diagnostic-token"))),
+            self.assertLogs(transport_module.LOGGER, level="WARNING") as logs,
+        ):
+            self.assertFalse(await connection.open())
+        self.assertIn("연결", logs.output[0])
+        self.assertIn("diagnostic-token", logs.output[0])
+
+
+class SerialOpenRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_serial_open_timeout_cancels_attempt_and_allows_reopen(self):
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked(**_kwargs):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        connection = AsyncConnection("/test-only", None, connect_timeout=0.01)
+        with patch("serialx.open_serial_connection", side_effect=blocked):
+            try:
+                result = await asyncio.wait_for(connection.open(), 0.3)
+            except TimeoutError:
+                self.fail("serial open exceeded its configured connection timeout")
+        self.assertFalse(result)
+        self.assertTrue(entered.is_set() and cancelled.is_set())
+        self.assertFalse(connection._is_connected())
+        self.assertIsNone(connection._reader)
+        self.assertIsNone(connection._writer)
+        reader = create_autospec(asyncio.StreamReader, instance=True)
+        writer = create_autospec(asyncio.StreamWriter, instance=True)
+        with patch("serialx.open_serial_connection", new=AsyncMock(return_value=(reader, writer))):
+            self.assertTrue(await connection.open())
+            self.assertIs(reader, connection._reader)
+            self.assertIs(writer, connection._writer)
+            await connection.close()
+
+    async def test_serial_open_cancellation_propagates_without_pending_opener(self):
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked(**_kwargs):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        connection = AsyncConnection("/test-only", None)
+        with patch("serialx.open_serial_connection", side_effect=blocked):
+            task = asyncio.create_task(connection.open())
+            await asyncio.wait_for(entered.wait(), 0.5)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(cancelled.is_set())
+        self.assertFalse(connection._is_connected())
+        self.assertIsNone(connection._reader)
+        self.assertIsNone(connection._writer)
+        self.assertFalse(any(t is not asyncio.current_task() and not t.done() for t in asyncio.all_tasks()))
+
+    async def test_gateway_stop_cancels_pending_serial_reopen(self):
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked(**_kwargs):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        gateway = KocomGateway(create_autospec(HomeAssistant, instance=True),
+                               create_autospec(ConfigEntry, instance=True), "/test-only", None)
+        with patch("serialx.open_serial_connection", side_effect=blocked):
+            gateway._task_reader = asyncio.create_task(gateway._read_loop())
+            await asyncio.wait_for(entered.wait(), 0.5)
+            await asyncio.wait_for(gateway.async_stop(), 0.5)
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(gateway._task_reader.cancelled())
+        self.assertFalse(gateway.conn._is_connected())
+        self.assertIsNone(gateway.conn._reader)
+        self.assertIsNone(gateway.conn._writer)
 
 
 if __name__ == "__main__":

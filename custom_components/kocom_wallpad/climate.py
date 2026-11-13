@@ -262,23 +262,23 @@ class KocomClimate(KocomBaseEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         args = {"hvac_mode": hvac_mode}
         await self._async_send_or_raise(
-            "set HVAC mode", "set_hvac", context=self._send_context(), **args
+            "냉난방 모드 설정", "set_hvac", context=self._send_context(), **args
         )
         
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         args = {"fan_mode": fan_mode}
-        await self._async_send_or_raise("set fan mode", "set_fan", **args)
+        await self._async_send_or_raise("풍량 모드 설정", "set_fan", **args)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         args = {"preset_mode": preset_mode}
         await self._async_send_or_raise(
-            "set preset mode", "set_preset", context=self._send_context(), **args
+            "외출 모드 설정", "set_preset", context=self._send_context(), **args
         )
 
     async def async_set_temperature(self, **kwargs) -> None:
         args = {"target_temp": float(kwargs[ATTR_TEMPERATURE])}
         await self._async_send_or_raise(
-            "set temperature", "set_temperature", context=self._send_context(), **args
+            "희망온도 설정", "set_temperature", context=self._send_context(), **args
         )
 
     @callback

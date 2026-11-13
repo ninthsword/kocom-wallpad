@@ -107,3 +107,55 @@ async def test_blocked_stream_is_bounded_and_can_reopen(operation):
         writer.wait_closed = AsyncMock()
         assert await connection.open()
         await connection.close()
+
+
+async def test_serial_open_timeout_cancels_attempt_and_allows_reopen():
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def blocked(**_kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    connection = AsyncConnection("/test-only", None, connect_timeout=0.01)
+    with patch("serialx.open_serial_connection", side_effect=blocked):
+        try:
+            result = await asyncio.wait_for(connection.open(), 0.3)
+        except TimeoutError:
+            pytest.fail("serial open exceeded its configured connection timeout")
+    assert not result
+    assert entered.is_set() and cancelled.is_set()
+    assert connection._reader is None and connection._writer is None
+    assert not connection._is_connected()
+    reader, writer = Mock(), Mock()
+    writer.wait_closed = AsyncMock()
+    with patch("serialx.open_serial_connection", new=AsyncMock(return_value=(reader, writer))):
+        assert await connection.open()
+        assert connection._reader is reader and connection._writer is writer
+        await connection.close()
+
+
+async def test_serial_open_cancellation_clears_state_and_propagates():
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def blocked(**_kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    connection = AsyncConnection("/test-only", None)
+    before = asyncio.all_tasks()
+    with patch("serialx.open_serial_connection", side_effect=blocked):
+        task = asyncio.create_task(connection.open())
+        await asyncio.wait_for(entered.wait(), 0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert cancelled.is_set()
+    assert connection._reader is None and connection._writer is None
+    assert not connection._is_connected()
+    assert not [task for task in asyncio.all_tasks() - before if not task.done()]

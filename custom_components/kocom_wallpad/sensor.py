@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, DeviceType
 from .entity_base import KocomBaseEntity
 from .gateway import KocomGateway
 from .models import DeviceState
@@ -48,7 +48,7 @@ async def async_setup_entry(
 
 
 # Preserve the HA MRO mixing cached descriptors and dynamic properties.
-class KocomSensor(KocomBaseEntity, SensorEntity):  # pyright: ignore[reportIncompatibleVariableOverride]
+class KocomSensor(KocomBaseEntity, SensorEntity):
     """Representation of a Kocom sensor."""
     
     def __init__(self, gateway: KocomGateway, device: DeviceState) -> None:
@@ -57,7 +57,16 @@ class KocomSensor(KocomBaseEntity, SensorEntity):  # pyright: ignore[reportIncom
 
     @property
     # HA declares a cached descriptor; retain dynamic property semantics.
-    def native_value(self) -> str | int | float:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def available(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
+        if self._device.key.device_type == DeviceType.ELEVATOR:
+            return self.gateway.is_transport_available()
+        return super().available
+
+    @property
+    # HA declares a cached descriptor; retain dynamic property semantics.
+    def native_value(self) -> str | int | float | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+        if self._device.key.device_type == DeviceType.ELEVATOR and not self.gateway.is_device_state_confirmed(self._device.key):
+            return None
         return self._device.state
     
     @property
